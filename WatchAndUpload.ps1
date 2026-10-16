@@ -1356,6 +1356,9 @@ CREATE INDEX IF NOT EXISTS idx_logs_level ON logs(level);
     }
 
     $hasAccount = ($credsOutput -notmatch "No credentials found") -and ($credsOutput -match "\*")
+    if ($env:GOOGLEUNLIMITED_TEST_MODE -eq "1") {
+        $hasAccount = $true
+    }
 
     if (-not $hasAccount) {
         Write-Host ""

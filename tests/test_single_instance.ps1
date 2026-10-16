@@ -35,6 +35,25 @@ foreach ($p in $priorProcesses) {
 }
 Start-Sleep -Milliseconds 500
 
+# Ensure test environment has a clean watch directory, test mode flag, and valid credentials config
+$env:GOOGLEUNLIMITED_TEST_MODE = "1"
+$emptyWatchDir = Join-Path $env:TEMP "gotohp_test_empty_watch_$([System.Guid]::NewGuid().ToString('N'))"
+New-Item -ItemType Directory -Path $emptyWatchDir -Force | Out-Null
+
+$repoConfig = Join-Path $repoDir "gotohp.config"
+$createdDummyConfig = $false
+if (-not [System.IO.File]::Exists($repoConfig)) {
+    @'
+account:
+    credentials:
+        - Email=ci-test%40example.com&Token=dummy&androidId=dummy&app=com.google.android.apps.photos&callerPkg=com.google.android.apps.photos&callerSig=dummy&client_sig=dummy&device_country=us&google_play_services_version=240913000&lang=en_US&oauth2_foreground=1&operatorCountry=us&sdk_version=33&service=oauth2&source=android
+    selected: ci-test@example.com
+'@ | Set-Content $repoConfig
+    $createdDummyConfig = $true
+}
+
+$watchArgs = "-NoProfile -ExecutionPolicy Bypass -File `"$watchScript`" -WatchDirs `"$emptyWatchDir`""
+
 try {
     # -------------------------------------------------------------
     # Test 1: First instance starts and acquires mutex
@@ -42,7 +61,7 @@ try {
     Write-Host "`n>>> [Test 1] Launching primary background instance..." -ForegroundColor Yellow
     $psi1 = New-Object System.Diagnostics.ProcessStartInfo
     $psi1.FileName = $psExe
-    $psi1.Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$watchScript`""
+    $psi1.Arguments = $watchArgs
     $psi1.WorkingDirectory = $repoDir
     $psi1.UseShellExecute = $false
     $psi1.RedirectStandardOutput = $true
@@ -73,7 +92,7 @@ try {
     Write-Host "`n>>> [Test 2] Launching second concurrent instance..." -ForegroundColor Yellow
     $psi2 = New-Object System.Diagnostics.ProcessStartInfo
     $psi2.FileName = $psExe
-    $psi2.Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$watchScript`""
+    $psi2.Arguments = $watchArgs
     $psi2.WorkingDirectory = $repoDir
     $psi2.UseShellExecute = $false
     $psi2.RedirectStandardOutput = $true
@@ -127,7 +146,7 @@ try {
     Write-Host ">>> Launching replacement instance after crash..." -ForegroundColor Yellow
     $psi3 = New-Object System.Diagnostics.ProcessStartInfo
     $psi3.FileName = $psExe
-    $psi3.Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$watchScript`""
+    $psi3.Arguments = $watchArgs
     $psi3.WorkingDirectory = $repoDir
     $psi3.UseShellExecute = $false
     $psi3.RedirectStandardOutput = $true
@@ -156,6 +175,15 @@ try {
     if ($proc2 -and -not $proc2.HasExited) { $proc2.Kill() }
     if ($proc3 -and -not $proc3.HasExited) { $proc3.Kill() }
     if ($procStatus -and -not $procStatus.HasExited) { $procStatus.Kill() }
+
+    # Clean up test environment
+    Remove-Item Env:\GOOGLEUNLIMITED_TEST_MODE -ErrorAction SilentlyContinue
+    if ($createdDummyConfig -and [System.IO.File]::Exists($repoConfig)) {
+        Remove-Item -LiteralPath $repoConfig -Force -ErrorAction SilentlyContinue
+    }
+    if (Test-Path $emptyWatchDir) {
+        Remove-Item -LiteralPath $emptyWatchDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
 }
 
 Write-Host "`n==========================================================" -ForegroundColor Cyan
