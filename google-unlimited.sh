@@ -22,6 +22,16 @@ RED='\033[0;31m'
 GRAY='\033[0;90m'
 NC='\033[0m'
 
+# Supported media extensions regex
+MEDIA_EXT_REGEX='^(jpg|jpeg|png|heic|heif|webp|gif|bmp|tiff|tif|svg|ico|jfif|avif|dng|raw|cr2|cr3|nef|arw|orf|rw2|pef|srw|raf|mp4|mov|mkv|avi|m4v|3gp|3g2|wmv|webm|mpg|mpeg|mts|m2ts|ts|flv|vob)$'
+
+is_media_file() {
+    local fpath="$1"
+    local ext="${fpath##*.}"
+    ext="$(echo "$ext" | tr '[:upper:]' '[:lower:]')"
+    echo "$ext" | grep -qE "$MEDIA_EXT_REGEX"
+}
+
 # ---------------------------------------------------------------------
 # CRYPTOGRAPHIC HASH & BINARY INTEGRITY (BUG-05, SEC-02)
 # ---------------------------------------------------------------------
@@ -104,7 +114,6 @@ do_verify() {
     verify_binary "$bin"
 }
 
-
 # ---------------------------------------------------------------------
 # BINARY & CONFIG DISCOVERY
 # ---------------------------------------------------------------------
@@ -149,17 +158,25 @@ get_gotohp_cmd() {
         exit 1
     fi
     if [ -f "$SCRIPT_DIR/gotohp.config" ]; then
-        echo "$bin|--config|$SCRIPT_DIR/gotohp.config"
+        echo "$bin --config $SCRIPT_DIR/gotohp.config"
     else
         echo "$bin"
     fi
 }
 
 run_gotohp() {
-    local cmd_spec
-    cmd_spec="$(get_gotohp_cmd)"
-    IFS='|' read -r -a cmd_arr <<< "$cmd_spec"
-    "${cmd_arr[@]}" "$@"
+    local bin
+    bin="$(get_gotohp_bin)"
+    if [ -z "$bin" ]; then
+        echo "ERROR: gotohp-cli binary not found in $SCRIPT_DIR or system PATH." >&2
+        echo "Please run: ./google-unlimited.sh setup" >&2
+        exit 1
+    fi
+    local cmd=("$bin")
+    if [ -f "$SCRIPT_DIR/gotohp.config" ]; then
+        cmd+=("--config" "$SCRIPT_DIR/gotohp.config")
+    fi
+    "${cmd[@]}" "$@"
     local ret=$?
     # Security: Ensure gotohp.config retains restrictive 600 permissions
     if [ -f "$SCRIPT_DIR/gotohp.config" ]; then
@@ -177,7 +194,7 @@ init_db() {
         exit 1
     fi
 
-    # Security: Ensure restricted permissions on database, WAL/SHM journals, and credentials (SEC-03)
+    # Security: Ensure restricted permissions on database, journals, and credentials (SEC-03)
     touch "$DB" 2>/dev/null || true
     chmod 600 "$DB"* 2>/dev/null || true
     if [ -f "$SCRIPT_DIR/gotohp.config" ]; then
@@ -249,14 +266,12 @@ is_uploaded() {
         local prev_size="${exact_row%%|*}"
         local prev_hash="${exact_row#*|}"
         if [ "$prev_size" -gt 0 ] && [ "$fsize" -gt 0 ] && [ "$prev_size" -ne "$fsize" ]; then
-            # File size changed -> modified in-place, NOT duplicate
             return 1
         fi
         if [ -n "$prev_hash" ]; then
             local cur_hash
             cur_hash="$(compute_content_hash "$fpath")"
             if [ -n "$cur_hash" ] && [ "$cur_hash" != "$prev_hash" ]; then
-                # Content changed -> modified in-place, NOT duplicate
                 return 1
             fi
         fi
@@ -271,24 +286,20 @@ is_uploaded() {
             local current_hash
             current_hash="$(compute_content_hash "$fpath")"
             if [ -n "$current_hash" ]; then
-                # Match against database content_hash to avoid false collisions between different files
                 local hash_match
                 hash_match=$(sqlite3 "$DB" "SELECT COUNT(*) FROM uploads WHERE file_name = '$escaped_name' AND file_size = $fsize AND content_hash = '$current_hash';" 2>/dev/null || echo 0)
                 if [ -n "$hash_match" ] && [ "$hash_match" -gt 0 ]; then
                     return 0
                 fi
-                # Check for legacy entry where content_hash was not set yet
+                # Check for legacy entry without content_hash
                 local legacy_match
                 legacy_match=$(sqlite3 "$DB" "SELECT COUNT(*) FROM uploads WHERE file_name = '$escaped_name' AND file_size = $fsize AND (content_hash IS NULL OR content_hash = '');" 2>/dev/null || echo 0)
                 if [ -n "$legacy_match" ] && [ "$legacy_match" -gt 0 ]; then
-                    # Backfill content_hash into legacy record
                     sqlite3 "$DB" "UPDATE uploads SET content_hash = '$current_hash' WHERE file_name = '$escaped_name' AND file_size = $fsize AND (content_hash IS NULL OR content_hash = '');" 2>/dev/null || true
                     return 0
                 fi
-                # Name and size matched, but content hash differs -> NOT duplicate
                 return 1
             else
-                # Fallback if hash tools unavailable
                 return 0
             fi
         fi
@@ -335,6 +346,26 @@ remove_retry() {
     sqlite3 "$DB" "DELETE FROM retry_queue WHERE path = '$escaped_path';" 2>/dev/null || true
 }
 
+flush_retry_queue() {
+    local retry_list
+    retry_list=$(sqlite3 "$DB" "SELECT path FROM retry_queue WHERE attempts < 3;" 2>/dev/null || true)
+    [ -z "$retry_list" ] && return
+    while IFS= read -r rfile; do
+        [ -z "$rfile" ] && continue
+        if [ -f "$rfile" ]; then
+            local rfname
+            rfname="$(basename "$rfile")"
+            local rsize_bytes
+            rsize_bytes=$(stat -c%s "$rfile" 2>/dev/null || stat -f%z "$rfile" 2>/dev/null || echo 0)
+            if ! is_uploaded "$rfile" "$rfname" "$rsize_bytes"; then
+                invoke_upload "$rfile"
+            fi
+        else
+            remove_retry "$rfile"
+        fi
+    done <<< "$retry_list"
+}
+
 # ---------------------------------------------------------------------
 # ACTION: SETUP & DEPENDENCIES
 # ---------------------------------------------------------------------
@@ -347,7 +378,6 @@ do_setup() {
     echo -e "${CYAN}==========================================================${NC}"
 
     if [ "$OS" = "Darwin" ]; then
-        # macOS dependency check
         local missing=()
         command -v fswatch >/dev/null 2>&1 || missing+=("fswatch")
         command -v sqlite3 >/dev/null 2>&1 || missing+=("sqlite3")
@@ -370,7 +400,6 @@ do_setup() {
             echo -e "${GREEN}[OK] Required packages (fswatch, sqlite3, curl) are already installed.${NC}"
         fi
 
-        # Download gotohp-cli Universal for macOS (Apple Silicon + Intel)
         local target_bin="$SCRIPT_DIR/gotohp-cli-macos-universal"
         if [ ! -s "$target_bin" ]; then
             echo -e "${YELLOW}[Setup] Downloading gotohp-cli Universal for macOS...${NC}"
@@ -391,14 +420,12 @@ do_setup() {
             verify_binary "$target_bin" || true
         fi
 
-        # Security: strip Apple quarantine flag & set secure permissions
         if [ -s "$target_bin" ]; then
             xattr -d com.apple.quarantine "$target_bin" 2>/dev/null || true
             chmod 700 "$target_bin" 2>/dev/null || true
         fi
 
     else
-        # Linux dependency check
         local missing=()
         command -v inotifywait >/dev/null 2>&1 || missing+=("inotify-tools")
         command -v sqlite3 >/dev/null 2>&1 || missing+=("sqlite3")
@@ -421,7 +448,6 @@ do_setup() {
             echo -e "${GREEN}[OK] Required packages (inotify-tools, sqlite3, curl) are already installed.${NC}"
         fi
 
-        # Verify/download gotohp-cli for Linux with integrity verification (SEC-02)
         local arch
         arch="$(uname -m)"
         local target_bin="$SCRIPT_DIR/gotohp-cli_amd64"
@@ -630,7 +656,6 @@ do_stop() {
     fi
 
     if [ "$OS" = "Darwin" ]; then
-        # Terminate macOS launchd agent if active
         launchctl stop com.googleunlimited.watcher 2>/dev/null || true
         local fpids
         fpids=$(pgrep -f "fswatch.*$SCRIPT_DIR" || true)
@@ -642,7 +667,6 @@ do_stop() {
             done
         fi
     else
-        # Terminate orphaned inotifywait listeners strictly scoped to watched paths
         local ipids
         ipids=$(pgrep -f "inotifywait -m -r -e close_write,moved_to,create" || true)
         if [ -n "$ipids" ]; then
@@ -653,7 +677,6 @@ do_stop() {
             done
         fi
 
-        # Terminate systemd user service if active
         if command -v systemctl >/dev/null 2>&1; then
             if systemctl --user is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
                 systemctl --user stop "$SERVICE_NAME" 2>/dev/null || true
@@ -690,7 +713,6 @@ do_enable_startup() {
         local plist_file="$plist_dir/com.googleunlimited.watcher.plist"
         mkdir -p "$plist_dir"
 
-        # Prevent restart loops on clean exit or missing auth (REL-01)
         cat << EOF > "$plist_file"
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -833,7 +855,7 @@ do_disable_startup() {
 }
 
 # ---------------------------------------------------------------------
-# ACTION: CORE WATCHER
+# ACTION: CORE WATCHER & UPLOADER
 # ---------------------------------------------------------------------
 wait_for_file_ready() {
     local fpath="$1"
@@ -842,19 +864,16 @@ wait_for_file_ready() {
     local last_size=-1
     local stable_count=0
 
-    # Bounded timeout loop (30 iterations)
     for ((i=0; i<30; i++)); do
         [ ! -f "$fpath" ] && return 2
         local size
         size=$(stat -c%s "$fpath" 2>/dev/null || stat -f%z "$fpath" 2>/dev/null || echo 0)
 
-        # 0-byte placeholders are not ready yet (wait for write to start)
         if [ "$size" -le 0 ]; then
             sleep 1
             continue
         fi
 
-        # Check if size is actively changing (file still being downloaded/written)
         if [ "$size" -ne "$last_size" ]; then
             last_size="$size"
             stable_count=1
@@ -864,7 +883,6 @@ wait_for_file_ready() {
             stable_count=$((stable_count + 1))
         fi
 
-        # Once size is stable across checks, verify writer lock
         if [ "$stable_count" -ge 2 ]; then
             local locked=0
             if command -v lsof >/dev/null 2>&1; then
@@ -882,7 +900,6 @@ wait_for_file_ready() {
                 continue
             fi
 
-            # File is non-empty, size is stable, and writer handle is released -> READY (BUG-01)
             return 0
         fi
 
@@ -900,10 +917,7 @@ invoke_upload() {
         *.db|*.db-wal|*.db-shm|*.config|*.tmp|*.crdownload|*.part) return ;;
     esac
 
-    local ext="${fpath##*.}"
-    ext="$(echo "$ext" | tr '[:upper:]' '[:lower:]')"
-    local valid_ext="^(jpg|jpeg|png|heic|heif|webp|gif|bmp|tiff|tif|svg|ico|jfif|avif|dng|raw|cr2|cr3|nef|arw|orf|rw2|pef|srw|raf|mp4|mov|mkv|avi|m4v|3gp|3g2|wmv|webm|mpg|mpeg|mts|m2ts|ts|flv|vob)$"
-    if ! echo "$ext" | grep -qE "$valid_ext"; then
+    if ! is_media_file "$fpath"; then
         return
     fi
 
@@ -1043,8 +1057,9 @@ do_watch() {
         fi
     done
 
-    # 2. Custom directories from watch_dirs.txt
+    # 2. Watch directory discovery
     if [ -f "$SCRIPT_DIR/watch_dirs.txt" ]; then
+        # When watch_dirs.txt exists, watch ONLY user-configured directories
         while IFS= read -r line || [ -n "$line" ]; do
             line="$(echo "$line" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
             [ -z "$line" ] && continue
@@ -1053,14 +1068,14 @@ do_watch() {
                 watch_dirs+=("$(cd "$line" && pwd)")
             fi
         done < "$SCRIPT_DIR/watch_dirs.txt"
+    else
+        # Default behavior: ONLY image and photo folders (Pictures, Downloads, cloud photos)
+        for folder in "$HOME/Pictures" "$HOME/Downloads" "$HOME/Google Photos" "$HOME/OneDrive/Pictures" "$HOME/Pictures/iCloud Photos/Photos"; do
+            if [ -d "$folder" ]; then
+                watch_dirs+=("$folder")
+            fi
+        done
     fi
-
-    # 3. Standard user folders & cloud sync folders
-    for folder in "$HOME/Downloads" "$HOME/Pictures" "$HOME/Desktop" "$HOME/Documents" "$HOME/Music" "$HOME/Movies" "$HOME/Videos" "$HOME/Google Drive" "$HOME/Google Photos" "$HOME/OneDrive/Pictures" "$HOME/Pictures/iCloud Photos/Photos"; do
-        if [ -d "$folder" ]; then
-            watch_dirs+=("$folder")
-        fi
-    done
 
     # Deduplicate watched folders
     local unique_dirs=()
@@ -1092,12 +1107,9 @@ do_watch() {
 
     # Phase 1: Startup Scan
     echo -e "${CYAN}[Phase 1] Scanning for unrecorded files...${NC}"
-    local valid_ext="^(jpg|jpeg|png|heic|heif|webp|gif|bmp|tiff|tif|svg|ico|jfif|avif|dng|raw|cr2|cr3|nef|arw|orf|rw2|pef|srw|raf|mp4|mov|mkv|avi|m4v|3gp|3g2|wmv|webm|mpg|mpeg|mts|m2ts|ts|flv|vob)$"
     local file_count=0
     while IFS= read -r -d '' file; do
-        local ext="${file##*.}"
-        ext="$(echo "$ext" | tr '[:upper:]' '[:lower:]')"
-        if echo "$ext" | grep -qE "$valid_ext"; then
+        if is_media_file "$file"; then
             local fname
             fname="$(basename "$file")"
             local size_bytes
@@ -1109,24 +1121,8 @@ do_watch() {
         fi
     done < <(find "${watch_dirs[@]}" -type f -print0 2>/dev/null)
 
-    # Check retry queue for previous failures
-    local retry_list
-    retry_list=$(sqlite3 "$DB" "SELECT path FROM retry_queue WHERE attempts < 3;" 2>/dev/null || true)
-    if [ -n "$retry_list" ]; then
-        while IFS= read -r rfile; do
-            [ -z "$rfile" ] && continue
-            if [ -f "$rfile" ]; then
-                local rfname
-                rfname="$(basename "$rfile")"
-                local rsize_bytes
-                rsize_bytes=$(stat -c%s "$rfile" 2>/dev/null || stat -f%z "$rfile" 2>/dev/null || echo 0)
-                if ! is_uploaded "$rfile" "$rfname" "$rsize_bytes"; then
-                    file_count=$((file_count + 1))
-                    invoke_upload "$rfile"
-                fi
-            fi
-        done <<< "$retry_list"
-    fi
+    # Flush any pending files from retry queue
+    flush_retry_queue
 
     if [ "$file_count" -eq 0 ]; then
         echo -e "${GREEN}[Phase 1] [OK] Everything backed up - zero new files.${NC}"
@@ -1158,7 +1154,6 @@ do_watch() {
     fi
 
     cleanup() {
-        # Untrap immediately to prevent recursive signal/exit loops
         trap - SIGINT SIGTERM EXIT
         echo ""
         echo "Stopping watcher..."
@@ -1184,32 +1179,13 @@ do_watch() {
         now=$(date +%s)
 
         # Flush retry queue every 30s
-        local retry_sweep
-        retry_sweep=$(sqlite3 "$DB" "SELECT path FROM retry_queue WHERE attempts < 3;" 2>/dev/null || true)
-        if [ -n "$retry_sweep" ]; then
-            while IFS= read -r rfile; do
-                [ -z "$rfile" ] && continue
-                if [ -f "$rfile" ]; then
-                    local rfname
-                    rfname="$(basename "$rfile")"
-                    local rsize_bytes
-                    rsize_bytes=$(stat -c%s "$rfile" 2>/dev/null || stat -f%z "$rfile" 2>/dev/null || echo 0)
-                    if ! is_uploaded "$rfile" "$rfname" "$rsize_bytes"; then
-                        invoke_upload "$rfile"
-                    fi
-                else
-                    remove_retry "$rfile"
-                fi
-            done <<< "$retry_sweep"
-        fi
+        flush_retry_queue
 
         # Safety sweep for missed files every 900s (15 minutes)
         if [ $((now - last_sweep)) -ge 900 ]; then
             last_sweep=$now
             while IFS= read -r -d '' file; do
-                local ext="${file##*.}"
-                ext="$(echo "$ext" | tr '[:upper:]' '[:lower:]')"
-                if echo "$ext" | grep -qE "$valid_ext"; then
+                if is_media_file "$file"; then
                     local fname
                     fname="$(basename "$file")"
                     local size_bytes
@@ -1235,7 +1211,6 @@ do_creds() {
         local token="${1:-}"
         if [ -z "$token" ] || [ "$token" = "-" ]; then
             if [ -t 0 ]; then
-                # Interactive terminal: prompt with hidden input (SEC-01)
                 local stty_state=""
                 stty_state="$(stty -g 2>/dev/null || true)"
                 restore_stty() {
@@ -1252,7 +1227,6 @@ do_creds() {
                 trap - INT TERM EXIT
                 restore_stty
             else
-                # Pipe or redirected standard input (creds add -)
                 read -r token
             fi
 
@@ -1262,7 +1236,6 @@ do_creds() {
             fi
             printf "%s\n" "$token" | run_gotohp creds add -
         else
-            # Positional argument provided: print deprecation warning (SEC-01)
             echo -e "${YELLOW}[SECURITY WARNING] Passing OAuth tokens via command-line arguments exposes them in process listings and shell history.${NC}" >&2
             echo -e "${YELLOW}Please use: ./google-unlimited.sh creds add (interactive hidden prompt) or pipe: creds add -${NC}" >&2
             printf "%s\n" "$token" | run_gotohp creds add -

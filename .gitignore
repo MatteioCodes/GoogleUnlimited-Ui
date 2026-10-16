@@ -3,6 +3,7 @@
 *.db-wal
 *.db-shm
 gphotos.db
+watch_dirs.txt
 
 # Authentication Credentials & Tokens (DO NOT COMMIT)
 gotohp.config

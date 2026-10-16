@@ -6,6 +6,15 @@ set "PS_CMD=powershell.exe -NoProfile -ExecutionPolicy Bypass"
 where pwsh.exe >nul 2>&1
 if %ERRORLEVEL% equ 0 set "PS_CMD=pwsh.exe -NoProfile -ExecutionPolicy Bypass"
 
+set "CLI_BIN="
+if exist "%~dp0gotohp-cli-x64.exe" set "CLI_BIN=%~dp0gotohp-cli-x64.exe"
+if not defined CLI_BIN if exist "%~dp0gotohp-cli.exe" set "CLI_BIN=%~dp0gotohp-cli.exe"
+if not defined CLI_BIN if exist "%~dp0gotohp-x64.exe" set "CLI_BIN=%~dp0gotohp-x64.exe"
+if not defined CLI_BIN if exist "%~dp0gotohp.exe" set "CLI_BIN=%~dp0gotohp.exe"
+
+set "CFG_ARG="
+if exist "%~dp0gotohp.config" set "CFG_ARG=--config "%~dp0gotohp.config""
+
 set "IS_MENU=0"
 if "%~1"=="" (
     set "IS_MENU=1"
@@ -16,6 +25,10 @@ if "%~1"=="" (
 
 :menu
 cls
+set "STARTUP_LNK=%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\GoogleUnlimited.lnk"
+set "BOOT_STATUS=[Status: DISABLED]"
+if exist "%STARTUP_LNK%" set "BOOT_STATUS=[Status: ENABLED]"
+
 echo ==========================================================
 echo   *  Google Unlimited Photos Auto-Sync (Windows)
 echo ==========================================================
@@ -23,7 +36,7 @@ echo   [1] Start Live Watcher (Interactive progress)
 echo   [2] Start Background Watcher (Silent, zero window)
 echo   [3] Check Backup Status
 echo   [4] View Activity Logs
-echo   [5] Enable Auto-Start on Windows Boot
+echo   [5] Enable Auto-Start on Windows Boot   %BOOT_STATUS%
 echo   [6] Disable Auto-Start on Windows Boot
 echo   [7] Stop Background Watcher
 echo   [8] Manage Watched Folders (Add/List custom folders)
@@ -86,7 +99,8 @@ exit /b 1
 :run_watcher
 if "%IS_MENU%"=="1" cls
 %PS_CMD% -File "%~dp0WatchAndUpload.ps1"
-if "%IS_MENU%"=="1" (pause & goto menu)
+if "%IS_MENU%"=="1" pause
+if "%IS_MENU%"=="1" goto menu
 exit /b %ERRORLEVEL%
 
 :run_watcher_arg
@@ -109,13 +123,26 @@ if defined EXTRA_ARGS (
 )
 exit /b %ERRORLEVEL%
 
-
 :run_silent
 if "%IS_MENU%"=="1" cls
+%PS_CMD% -File "%~dp0WatchAndUpload.ps1" -CheckRunning >nul 2>&1
+if errorlevel 1 goto do_launch_silent
+echo ==========================================================
+echo   *  Google Unlimited Photos Auto-Sync
+echo ==========================================================
+echo [INFO] Google Photos background watcher is ALREADY running.
+echo        No need to start duplicate instance.
+echo ==========================================================
+if "%IS_MENU%"=="1" pause
+if "%IS_MENU%"=="1" goto menu
+exit /b 0
+
+:do_launch_silent
 echo Launching Google Photos watcher in silent background mode...
 wscript.exe "%~dp0StartPhotosWatcher.vbs"
 echo [OK] Background watcher launched.
-if "%IS_MENU%"=="1" ((timeout /t 3 >nul 2>&1 || ping -n 4 127.0.0.1 >nul) & goto menu)
+if "%IS_MENU%"=="1" timeout /t 3 >nul 2>&1
+if "%IS_MENU%"=="1" goto menu
 exit /b 0
 
 :check_status
@@ -149,60 +176,19 @@ if "%IS_MENU%"=="1" (pause & goto menu)
 exit /b %ERRORLEVEL%
 
 :manage_folders
-cls
-echo ==========================================================
-echo   *  Manage Watched Folders
-echo ==========================================================
-set "WATCH_CONF=%~dp0watch_dirs.txt"
-if exist "%WATCH_CONF%" (
-    echo Current custom watch folders in watch_dirs.txt:
-    type "%WATCH_CONF%"
-)
-if not exist "%WATCH_CONF%" (
-    echo No custom folders configured yet [using standard user and cloud folders].
-)
-echo.
-echo Options:
-echo   [1] Add a custom folder path to watch
-echo   [2] Clear all custom folders
-echo   [0] Back to main menu
-echo ==========================================================
-set "fchoice="
-set /p "fchoice=Select an option [0-2]: "
-if "%fchoice%"=="1" goto add_watch_folder
-if "%fchoice%"=="2" goto clear_watch_folders
-if "%fchoice%"=="0" goto menu
-echo Invalid option.
-timeout /t 2 >nul 2>&1 || ping -n 3 127.0.0.1 >nul
-goto manage_folders
-
-:add_watch_folder
-echo.
-set "newdir="
-set /p "newdir=Enter full path of folder to watch: "
-if not "%newdir%"=="" (
-    >>"%WATCH_CONF%" echo %newdir%
-    echo [OK] Added folder: %newdir%
-)
-timeout /t 2 >nul 2>&1 || ping -n 3 127.0.0.1 >nul
-goto manage_folders
-
-:clear_watch_folders
-if exist "%WATCH_CONF%" del "%WATCH_CONF%"
-echo [OK] Custom watch folders cleared.
-timeout /t 2 >nul 2>&1 || ping -n 3 127.0.0.1 >nul
-goto manage_folders
+%PS_CMD% -File "%~dp0WatchAndUpload.ps1" -ManageDirs
+if "%IS_MENU%"=="1" goto menu
+exit /b %ERRORLEVEL%
 
 :manage_account
 cls
 echo ==========================================================
 echo   *  Google Photos Account Management
 echo ==========================================================
-if exist "%~dp0gotohp-cli-x64.exe" (
-    "%~dp0gotohp-cli-x64.exe" --config "%~dp0gotohp.config" creds list
-)
-if not exist "%~dp0gotohp-cli-x64.exe" (
-    echo gotohp-cli-x64.exe not found.
+if defined CLI_BIN (
+    "%CLI_BIN%" %CFG_ARG% creds list
+) else (
+    echo gotohp-cli executable not found.
 )
 echo.
 echo Options:
@@ -223,8 +209,8 @@ goto manage_account
 echo.
 set "acemail="
 set /p "acemail=Enter email address to set active: "
-if not "%acemail%"=="" (
-    "%~dp0gotohp-cli-x64.exe" --config "%~dp0gotohp.config" creds set %acemail%
+if not "%acemail%"=="" if defined CLI_BIN (
+    "%CLI_BIN%" %CFG_ARG% creds set %acemail%
 )
 pause
 goto manage_account

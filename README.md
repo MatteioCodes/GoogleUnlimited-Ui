@@ -190,8 +190,9 @@ chmod +x google-unlimited.sh
    - Find the cookie named **`oauth_token`** and copy its full value.
 4. In your Linux terminal, run:
    ```bash
-   ./google-unlimited.sh creds add "<oauth_token>"
+   ./google-unlimited.sh creds add
    ```
+   *(When prompted, paste your `oauth_token`. Input is hidden for security so your token is never exposed in shell history or process listings. You can also pipe via: `echo "<oauth_token>" | ./google-unlimited.sh creds add -`)*.
 5. Verify your active account:
    ```bash
    ./google-unlimited.sh creds list
@@ -218,6 +219,7 @@ Run `./google-unlimited.sh` in your terminal to open the interactive manager:
   [5] Enable Auto-Start on Boot (Linux systemd)
   [6] Disable Auto-Start on Boot
   [7] Stop Background Watcher
+  [8] Verify Binary Integrity
   [0] Exit
 ==========================================================
 ```
@@ -230,6 +232,7 @@ Or pass any command directly:
 ./google-unlimited.sh status     # View upload statistics and retry queue
 ./google-unlimited.sh logs       # View recent activity logs with colors
 ./google-unlimited.sh stop       # Terminate background watcher
+./google-unlimited.sh verify     # Verify binary integrity using trusted SHA-256
 ```
 
 ---

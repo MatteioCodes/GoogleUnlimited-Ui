@@ -14,11 +14,24 @@ If Not fso.FileExists(ps1Path) Then
     WScript.Quit 1
 End If
 
-' Use pwsh.exe if available, otherwise powershell.exe
+' Set working directory to script location
+WshShell.CurrentDirectory = currentFolder
+
+' Use pwsh.exe if available with full path, otherwise fallback to powershell.exe
 psExe = "powershell.exe"
-If fso.FileExists(WshShell.ExpandEnvironmentStrings("%ProgramFiles%\PowerShell\7\pwsh.exe")) Then
-    psExe = "pwsh.exe"
+pwshPath = WshShell.ExpandEnvironmentStrings("%ProgramFiles%\PowerShell\7\pwsh.exe")
+If fso.FileExists(pwshPath) Then
+    psExe = """" & pwshPath & """"
+End If
+
+' Check if watcher is already running
+checkCmd = psExe & " -NoProfile -ExecutionPolicy Bypass -File """ & ps1Path & """ -CheckRunning"
+retCode = WshShell.Run(checkCmd, 0, True)
+If retCode = 0 Then
+    ' Watcher is already running; exit safely without duplicate process
+    WScript.Quit 0
 End If
 
 command = psExe & " -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File """ & ps1Path & """"
 WshShell.Run command, 0, False
+
