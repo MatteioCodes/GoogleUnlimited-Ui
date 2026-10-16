@@ -589,7 +589,8 @@ try {
     $script:MIN_BYTES = 10240   # 10 KB minimum file size
     $script:MAX_RETRY = 3       # Max retry attempts per file
     $script:LOG_RETENTION_DAYS = 30
-    $script:lastUploadSpeed = 25MB  # Adaptive baseline for smooth progress tracking
+    $script:lastUploadSpeed = 5MB  # Adaptive baseline for smooth, realistic progress tracking
+    $script:currentUploadProc = $null
 
     # Supported media extensions (photos, camera RAWs, and videos)
     $script:EXT = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
@@ -1028,14 +1029,23 @@ CREATE INDEX IF NOT EXISTS idx_logs_level ON logs(level);
 
                 if ($info.Length -ne $lastSize) {
                     $lastSize = $info.Length
-                    Start-Sleep -Seconds 2
+                    $wait = if ($info.Length -ge 50MB) { 4 } else { 2 }
+                    Start-Sleep -Seconds $wait
                     continue
                 }
 
-                $fs = [System.IO.File]::Open($path, 'Open', 'Read', 'None')
-                $fs.Close()
-                $fs.Dispose()
-                return "READY"
+                # Verify write-exclusivity so active recordings (OBS, Game Bar) are not uploaded mid-recording
+                try {
+                    $fs = [System.IO.File]::Open($path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
+                    $fs.Close()
+                    $fs.Dispose()
+                    return "READY"
+                } catch {
+                    $fs = [System.IO.File]::Open($path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::None)
+                    $fs.Close()
+                    $fs.Dispose()
+                    return "READY"
+                }
             } catch {
                 Start-Sleep -Seconds 2
             }
@@ -1176,6 +1186,7 @@ CREATE INDEX IF NOT EXISTS idx_logs_level ON logs(level);
             $psi.RedirectStandardError = $true
 
             $proc = [System.Diagnostics.Process]::Start($psi)
+            $script:currentUploadProc = $proc
             $sw = [System.Diagnostics.Stopwatch]::StartNew()
             $barWidth = 14
 
@@ -1186,72 +1197,55 @@ CREATE INDEX IF NOT EXISTS idx_logs_level ON logs(level);
             $timeoutSeconds = [Math]::Max(600, [int]($fileInfo.Length / 50KB))
             $timedOut = $false
 
-            $hasIoHelper = [bool](([System.Management.Automation.PSTypeName]'Win32IoHelper').Type)
-            $initialRead = 0UL
-            if ($hasIoHelper) {
-                try {
-                    $io = New-Object Win32IoHelper+IO_COUNTERS
-                    if ([Win32IoHelper]::GetProcessIoCounters($proc.Handle, [ref]$io)) {
-                        $initialRead = $io.ReadTransferCount
-                    }
-                } catch {}
-            }
-
             $fileBytes = [double]$fileInfo.Length
             $isMB = $fileBytes -ge 1MB
             $unitDiv = if ($isMB) { 1MB } else { 1KB }
             $unitName = if ($isMB) { "MB" } else { "KB" }
             $totalFormatted = [Math]::Round($fileBytes / $unitDiv, 1).ToString("0.0")
 
-            while (-not $proc.WaitForExit(150)) {
-                $elapsedSec = $sw.Elapsed.TotalSeconds
-                if ($elapsedSec -ge $timeoutSeconds) {
-                    $timedOut = $true
-                    try {
-                        $proc.Kill()
-                    } catch {}
-                    break
-                }
+            $estSpeed = if ($script:lastUploadSpeed -and $script:lastUploadSpeed -gt 0) { $script:lastUploadSpeed } else { 5MB }
+            $estTotalSec = [Math]::Max(3.0, $fileBytes / $estSpeed)
 
-                $estDuration = [Math]::Max(2.0, $fileBytes / [Math]::Max(1MB, $script:lastUploadSpeed))
-                $ratio = [Math]::Min(0.98, [Math]::Max(0.01, $elapsedSec / ($elapsedSec + ($estDuration * 0.6))))
-
-                if ($hasIoHelper) {
-                    try {
-                        $io = New-Object Win32IoHelper+IO_COUNTERS
-                        if ([Win32IoHelper]::GetProcessIoCounters($proc.Handle, [ref]$io)) {
-                            $rawDelta = [double]($io.ReadTransferCount - $initialRead)
-                            $readBytes = [Math]::Max(0.0, $rawDelta - 16384.0)
-                            if ($fileBytes -gt 0 -and $readBytes -lt $fileBytes) {
-                                $diskRatio = $readBytes / $fileBytes
-                                $ratio = [Math]::Min(0.98, [Math]::Max($ratio, $diskRatio * 0.85))
-                            }
-                        }
-                    } catch {}
-                }
-
-                $uploadedBytes = [Math]::Min($fileBytes * 0.99, $fileBytes * $ratio)
-                $pct = [Math]::Round($ratio * 100.0, 1)
-                $filled = [int][Math]::Floor($ratio * $barWidth)
-                $filled = [Math]::Max(0, [Math]::Min($barWidth, $filled))
-                $bar = ("#" * $filled) + ("-" * ($barWidth - $filled))
-
-                $currFormatted = [Math]::Round($uploadedBytes / $unitDiv, 1).ToString("0.0")
-                $pctStr = ($pct.ToString("0.0")).PadLeft(5)
-
-                $timeStr = "$([Math]::Round($elapsedSec, 1).ToString('0.0'))s"
-                $etaStr = ""
-                if ($ratio -gt 0.03 -and $elapsedSec -gt 0.4) {
-                    $speedBytes = $uploadedBytes / $elapsedSec
-                    $remainBytes = [Math]::Max(0.0, $fileBytes - $uploadedBytes)
-                    if ($speedBytes -gt 0) {
-                        $remainSec = $remainBytes / $speedBytes
-                        $etaStr = ", " + (Format-RemainingTime $remainSec)
+            try {
+                while (-not $proc.WaitForExit(150)) {
+                    $elapsedSec = $sw.Elapsed.TotalSeconds
+                    if ($elapsedSec -ge $timeoutSeconds) {
+                        $timedOut = $true
+                        try {
+                            $proc.Kill()
+                        } catch {}
+                        break
                     }
-                }
 
-                $progLine = "  [$bar] $pctStr% | $currFormatted / $totalFormatted $unitName ($timeStr$etaStr)"
-                Safe-ConsoleWrite ($progLine.PadRight(68))
+                    # Maintain steady, linear upload speed progression
+                    $effectiveTotalSec = [Math]::Max($estTotalSec, $elapsedSec * 1.15 + 2.0)
+                    $ratio = [Math]::Min(0.985, [Math]::Max(0.01, $elapsedSec / $effectiveTotalSec))
+                    $uploadedBytes = $fileBytes * $ratio
+
+                    $pct = [Math]::Round($ratio * 100.0, 1)
+                    $filled = [int][Math]::Floor($ratio * $barWidth)
+                    $filled = [Math]::Max(0, [Math]::Min($barWidth, $filled))
+                    $bar = ("#" * $filled) + ("-" * ($barWidth - $filled))
+
+                    $currFormatted = [Math]::Round($uploadedBytes / $unitDiv, 1).ToString("0.0")
+                    $pctStr = ($pct.ToString("0.0")).PadLeft(5)
+
+                    $timeStr = "$([Math]::Round($elapsedSec, 1).ToString('0.0'))s"
+                    $etaStr = ""
+                    if ($ratio -gt 0.03 -and $elapsedSec -gt 0.4) {
+                        $speedBytes = $uploadedBytes / $elapsedSec
+                        $remainBytes = [Math]::Max(0.0, $fileBytes - $uploadedBytes)
+                        if ($speedBytes -gt 0) {
+                            $remainSec = $remainBytes / $speedBytes
+                            $etaStr = ", " + (Format-RemainingTime $remainSec)
+                        }
+                    }
+
+                    $progLine = "  [$bar] $pctStr% | $currFormatted / $totalFormatted $unitName ($timeStr$etaStr)"
+                    Safe-ConsoleWrite ($progLine.PadRight(68))
+                }
+            } finally {
+                $script:currentUploadProc = $null
             }
 
             $stdout = ""
@@ -1660,6 +1654,13 @@ CREATE INDEX IF NOT EXISTS idx_logs_level ON logs(level);
     Get-EventSubscriber -ErrorAction SilentlyContinue |
         Where-Object { $_.SourceIdentifier -notlike "PowerShell*" } |
         Unregister-Event -ErrorAction SilentlyContinue
+
+    if ($script:currentUploadProc -and -not $script:currentUploadProc.HasExited) {
+        try {
+            $script:currentUploadProc.Kill()
+        } catch {}
+        $script:currentUploadProc = $null
+    }
 
     if ($script:hasInstanceMutex -and $script:instanceMutex) {
         try {
