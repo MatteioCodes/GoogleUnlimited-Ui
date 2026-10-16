@@ -557,16 +557,14 @@ if (-not ($StatusOnly -or $ShowLogs -or $CheckRunning -or $ManageDirs -or $AddWa
 
     try {
         [bool]$createdNew = $false
-        $script:instanceMutex = New-Object System.Threading.Mutex($true, $script:instanceMutexName, [ref]$createdNew)
-        if ($createdNew) {
+        $script:instanceMutex = New-Object System.Threading.Mutex($false, $script:instanceMutexName, [ref]$createdNew)
+        try {
+            $script:hasInstanceMutex = $script:instanceMutex.WaitOne(1000, $false)
+        } catch [System.Threading.AbandonedMutexException] {
             $script:hasInstanceMutex = $true
-        } else {
-            try {
-                $script:hasInstanceMutex = $script:instanceMutex.WaitOne(0, $false)
-            } catch [System.Threading.AbandonedMutexException] {
-                $script:hasInstanceMutex = $true
-            }
         }
+    } catch [System.Threading.AbandonedMutexException] {
+        $script:hasInstanceMutex = $true
     } catch {
         Write-Host "Warning: Could not access instance mutex: $_" -ForegroundColor Yellow
         $script:hasInstanceMutex = $false

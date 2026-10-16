@@ -122,7 +122,7 @@ try {
     [void]$proc1.WaitForExit(3000)
     Assert-Condition "Instance 1 terminated" $proc1.HasExited
 
-    Start-Sleep -Milliseconds 500
+    Start-Sleep -Milliseconds 1000
 
     Write-Host ">>> Launching replacement instance after crash..." -ForegroundColor Yellow
     $psi3 = New-Object System.Diagnostics.ProcessStartInfo
@@ -135,11 +135,20 @@ try {
     $proc3 = [System.Diagnostics.Process]::Start($psi3)
 
     Start-Sleep -Seconds 2
-    Assert-Condition "Replacement instance acquired abandoned mutex and is running" (-not $proc3.HasExited)
+    $proc3Output = ""
+    $proc3Error = ""
+    if ($proc3.HasExited) {
+        $proc3Output = $proc3.StandardOutput.ReadToEnd()
+        $proc3Error = $proc3.StandardError.ReadToEnd()
+    }
+    Assert-Condition "Replacement instance acquired abandoned mutex and is running" (-not $proc3.HasExited) `
+        "ExitCode: $($proc3.ExitCode), Output: $proc3Output, Err: $proc3Error"
 
     # Clean up instance 3
-    $proc3.Kill()
-    [void]$proc3.WaitForExit(2000)
+    if (-not $proc3.HasExited) {
+        $proc3.Kill()
+        [void]$proc3.WaitForExit(2000)
+    }
 
 } finally {
     # Ensure all test child processes are cleanly stopped
