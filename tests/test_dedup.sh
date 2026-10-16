@@ -48,10 +48,22 @@ test_is_uploaded() {
     local escaped_path="${fpath//\'/\'\'}"
     local escaped_name="${fname//\'/\'\'}"
 
-    # 1. Exact path
-    local exact
-    exact=$(sqlite3 "$TEST_DB" "SELECT COUNT(*) FROM uploads WHERE path = '$escaped_path';" 2>/dev/null || echo 0)
-    if [ "$exact" -gt 0 ]; then
+    # 1. Exact path (with in-place modification verification)
+    local exact_row
+    exact_row=$(sqlite3 "$TEST_DB" "SELECT file_size || '|' || COALESCE(content_hash, '') FROM uploads WHERE path = '$escaped_path' LIMIT 1;" 2>/dev/null || true)
+    if [ -n "$exact_row" ]; then
+        local prev_size="${exact_row%%|*}"
+        local prev_hash="${exact_row#*|}"
+        if [ "$prev_size" -gt 0 ] && [ "$fsize" -gt 0 ] && [ "$prev_size" -ne "$fsize" ]; then
+            return 1
+        fi
+        if [ -n "$prev_hash" ]; then
+            local cur_hash
+            cur_hash="$(compute_hash "$fpath")"
+            if [ -n "$cur_hash" ] && [ "$cur_hash" != "$prev_hash" ]; then
+                return 1
+            fi
+        fi
         return 0
     fi
 
@@ -122,6 +134,21 @@ mkdir -p "$TEMP_DIR/FolderC"
 head -c 1024 < /dev/zero | tr '\0' 'Z' > "$FILE_C"
 test_is_uploaded "$FILE_C" && res3=0 || res3=$?
 assert_result "Same name and size but different content returns 1 (NOT duplicate)" "$res3" 1
+
+# 4. File A modified in-place with different size (CONF-04)
+head -c 2048 < /dev/zero | tr '\0' 'A' > "$FILE_A"
+test_is_uploaded "$FILE_A" && res4=0 || res4=$?
+assert_result "Modified file with different size on same path returns 1 (NOT duplicate)" "$res4" 1
+
+# 5. File A modified in-place with same size but different content (CONF-04)
+head -c 1024 < /dev/zero | tr '\0' 'M' > "$FILE_A"
+test_is_uploaded "$FILE_A" && res5=0 || res5=$?
+assert_result "Modified file with same size but different content on same path returns 1 (NOT duplicate)" "$res5" 1
+
+# 6. File A restored to original content: should return 0 (duplicate)
+head -c 1024 < /dev/zero | tr '\0' 'A' > "$FILE_A"
+test_is_uploaded "$FILE_A" && res6=0 || res6=$?
+assert_result "Restored file with original content on same path returns 0 (duplicate)" "$res6" 0
 
 echo "=========================================================="
 echo "  RESULTS: $PASSED Passed, $FAILED Failed"

@@ -56,8 +56,21 @@ function Test-IsDuplicate([string]$path, [string]$dbPath) {
     $size = $fileInfo.Length
 
     # 1. Exact path check
-    $exact = Invoke-SqliteQuery -DataSource $dbPath -Query "SELECT COUNT(*) as cnt FROM uploads WHERE path = @p" -SqlParameters @{ p = $path }
-    if ($exact.cnt -gt 0) { return $true }
+    $exact = Invoke-SqliteQuery -DataSource $dbPath `
+        -Query "SELECT file_size, content_hash FROM uploads WHERE path = @p LIMIT 1" `
+        -SqlParameters @{ p = $path }
+    if ($exact) {
+        if ($exact.file_size -and $exact.file_size -gt 0 -and $exact.file_size -ne $size) {
+            return $false
+        }
+        if ($exact.content_hash) {
+            $curHash = Get-FileHashSafe $path
+            if ($curHash -and $curHash -ne $exact.content_hash) {
+                return $false
+            }
+        }
+        return $true
+    }
 
     # 2. Check candidate hash against DB records with matching name and size
     $candidateHash = Get-FileHashSafe $path
@@ -134,6 +147,18 @@ try {
     
     # Query with new local path: should match legacy record gracefully
     Assert-Result "Legacy entry without content_hash matches gracefully" (Test-IsDuplicate $fileLegacy $testDb) $true
+
+    # 5. Test in-place modification of File A with different size (CONF-04)
+    [System.IO.File]::WriteAllBytes($fileA, [System.Text.Encoding]::ASCII.GetBytes("A" * 2048))
+    Assert-Result "Modified file with different size on same path is NOT treated as duplicate (CONF-04)" (Test-IsDuplicate $fileA $testDb) $false
+
+    # 6. Test in-place modification of File A with same size but different content (CONF-04)
+    [System.IO.File]::WriteAllBytes($fileA, [System.Text.Encoding]::ASCII.GetBytes("Z" * 1024))
+    Assert-Result "Modified file with same size but different content on same path is NOT treated as duplicate (CONF-04)" (Test-IsDuplicate $fileA $testDb) $false
+
+    # 7. Restore File A original content: should be recognized as duplicate again
+    [System.IO.File]::WriteAllBytes($fileA, $bytesA)
+    Assert-Result "Unchanged file on same path is recognized as duplicate after content restore" (Test-IsDuplicate $fileA $testDb) $true
 
 } finally {
     Remove-Item -Path $tempDir -Recurse -Force -ErrorAction SilentlyContinue

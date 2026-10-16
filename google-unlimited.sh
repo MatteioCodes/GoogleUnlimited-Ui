@@ -242,10 +242,24 @@ is_uploaded() {
         fsize=0
     fi
 
-    # 1. Exact path match
-    local exact
-    exact=$(sqlite3 "$DB" "SELECT COUNT(*) FROM uploads WHERE path = '$escaped_path';" 2>/dev/null || echo 0)
-    if [ -n "$exact" ] && [ "$exact" -gt 0 ]; then
+    # 1. Exact path match: verify file size and hash haven't changed since previous upload
+    local exact_row
+    exact_row=$(sqlite3 "$DB" "SELECT file_size || '|' || COALESCE(content_hash, '') FROM uploads WHERE path = '$escaped_path' LIMIT 1;" 2>/dev/null || true)
+    if [ -n "$exact_row" ]; then
+        local prev_size="${exact_row%%|*}"
+        local prev_hash="${exact_row#*|}"
+        if [ "$prev_size" -gt 0 ] && [ "$fsize" -gt 0 ] && [ "$prev_size" -ne "$fsize" ]; then
+            # File size changed -> modified in-place, NOT duplicate
+            return 1
+        fi
+        if [ -n "$prev_hash" ]; then
+            local cur_hash
+            cur_hash="$(compute_content_hash "$fpath")"
+            if [ -n "$cur_hash" ] && [ "$cur_hash" != "$prev_hash" ]; then
+                # Content changed -> modified in-place, NOT duplicate
+                return 1
+            fi
+        fi
         return 0
     fi
 
@@ -362,7 +376,7 @@ do_setup() {
             echo -e "${YELLOW}[Setup] Downloading gotohp-cli Universal for macOS...${NC}"
             local tmp_bin="$target_bin.dl"
             rm -f "$tmp_bin"
-            if curl -fSL "https://github.com/xob0t/gotohp/releases/latest/download/gotohp-cli-macos-universal" -o "$tmp_bin"; then
+            if curl -fSL "https://github.com/xob0t/gotohp/releases/download/v0.11.0/gotohp-cli-macos-universal" -o "$tmp_bin"; then
                 if verify_binary "$tmp_bin"; then
                     mv "$tmp_bin" "$target_bin"
                 else
@@ -411,10 +425,10 @@ do_setup() {
         local arch
         arch="$(uname -m)"
         local target_bin="$SCRIPT_DIR/gotohp-cli_amd64"
-        local dl_url="https://github.com/xob0t/gotohp/releases/latest/download/gotohp-cli_amd64"
+        local dl_url="https://github.com/xob0t/gotohp/releases/download/v0.11.0/gotohp-cli_amd64"
         if [ "$arch" = "aarch64" ] || [ "$arch" = "arm64" ]; then
             target_bin="$SCRIPT_DIR/gotohp-cli_arm64"
-            dl_url="https://github.com/xob0t/gotohp/releases/latest/download/gotohp-cli_arm64"
+            dl_url="https://github.com/xob0t/gotohp/releases/download/v0.11.0/gotohp-cli_arm64"
         fi
 
         if [ ! -s "$target_bin" ]; then
@@ -888,7 +902,7 @@ invoke_upload() {
 
     local ext="${fpath##*.}"
     ext="$(echo "$ext" | tr '[:upper:]' '[:lower:]')"
-    local valid_ext="^(jpg|jpeg|png|heic|webp|gif|mp4|mov|mkv|avi|dng)$"
+    local valid_ext="^(jpg|jpeg|png|heic|heif|webp|gif|bmp|tiff|tif|svg|ico|jfif|avif|dng|raw|cr2|cr3|nef|arw|orf|rw2|pef|srw|raf|mp4|mov|mkv|avi|m4v|3gp|3g2|wmv|webm|mpg|mpeg|mts|m2ts|ts|flv|vob)$"
     if ! echo "$ext" | grep -qE "$valid_ext"; then
         return
     fi
@@ -934,24 +948,25 @@ invoke_upload() {
     end_time=$(date +%s)
     local duration=$((end_time - start_time))
 
+    local mkey=""
+    mkey="$(echo "$output" | grep -o '"mediaKey": *"[^"]*"' | head -n1 | cut -d'"' -f4 || echo "")"
+    local err_msg=""
+    err_msg="$(echo "$output" | grep -o '"error": *"[^"]*"' | head -n1 | cut -d'"' -f4 || echo "")"
+    [ -z "$err_msg" ] && err_msg="$(echo "$output" | grep -o '"message": *"[^"]*"' | head -n1 | cut -d'"' -f4 || echo "")"
+
     local is_success=0
-    if [ $exit_code -eq 0 ]; then
-        is_success=1
-    elif echo "$output" | grep -q '"success": *true'; then
-        is_success=1
+    if [ $exit_code -eq 0 ] && [ -z "$err_msg" ]; then
+        if echo "$output" | grep -q '"success": *true' || [ -n "$mkey" ]; then
+            is_success=1
+        fi
     fi
 
     if [ $is_success -eq 1 ]; then
-        local mkey
-        mkey="$(echo "$output" | grep -o '"mediaKey": *"[^"]*"' | head -n1 | cut -d'"' -f4 || echo "")"
         echo "  [####################] 100% [OK] Uploaded in ${duration}s: $fname (${size_mb} MB)"
         write_log "SUCCESS | $fname (${size_mb} MB in ${duration}s)" "OK"
         save_upload "$fpath" "$mkey" "$fname" "$size_bytes"
     else
         echo "  [--------------------] FAILED in ${duration}s: $fname"
-        local err_msg
-        err_msg="$(echo "$output" | grep -o '"error": *"[^"]*"' | head -n1 | cut -d'"' -f4 || echo "")"
-        [ -z "$err_msg" ] && err_msg="$(echo "$output" | grep -o '"message": *"[^"]*"' | head -n1 | cut -d'"' -f4 || echo "")"
         local err_suffix=""
         [ -n "$err_msg" ] && err_suffix=" ($err_msg)"
 
@@ -1161,26 +1176,14 @@ do_watch() {
     }
     trap cleanup SIGINT SIGTERM EXIT
 
-    # Phase 2 Periodic Sweep: safety sweep & retry queue processor every 30s
+    # Phase 2: periodic retry queue processor (every 30s) and safety sweep (every 15m / 900s)
+    local last_sweep=0
     while kill -0 "$watcher_pid" 2>/dev/null; do
         sleep 30
-        # Safety sweep for missed files
-        while IFS= read -r -d '' file; do
-            local ext="${file##*.}"
-            ext="$(echo "$ext" | tr '[:upper:]' '[:lower:]')"
-            if echo "$ext" | grep -qE "$valid_ext"; then
-                local fname
-                fname="$(basename "$file")"
-                local size_bytes
-                size_bytes=$(stat -c%s "$file" 2>/dev/null || stat -f%z "$file" 2>/dev/null || echo 0)
-                if ! is_uploaded "$file" "$fname" "$size_bytes"; then
-                    write_log "Sweep caught missed file: $fname" "WARN"
-                    invoke_upload "$file"
-                fi
-            fi
-        done < <(find "${watch_dirs[@]}" -type f -print0 2>/dev/null)
+        local now
+        now=$(date +%s)
 
-        # Flush retry queue
+        # Flush retry queue every 30s
         local retry_sweep
         retry_sweep=$(sqlite3 "$DB" "SELECT path FROM retry_queue WHERE attempts < 3;" 2>/dev/null || true)
         if [ -n "$retry_sweep" ]; then
@@ -1198,6 +1201,25 @@ do_watch() {
                     remove_retry "$rfile"
                 fi
             done <<< "$retry_sweep"
+        fi
+
+        # Safety sweep for missed files every 900s (15 minutes)
+        if [ $((now - last_sweep)) -ge 900 ]; then
+            last_sweep=$now
+            while IFS= read -r -d '' file; do
+                local ext="${file##*.}"
+                ext="$(echo "$ext" | tr '[:upper:]' '[:lower:]')"
+                if echo "$ext" | grep -qE "$valid_ext"; then
+                    local fname
+                    fname="$(basename "$file")"
+                    local size_bytes
+                    size_bytes=$(stat -c%s "$file" 2>/dev/null || stat -f%z "$file" 2>/dev/null || echo 0)
+                    if ! is_uploaded "$file" "$fname" "$size_bytes"; then
+                        write_log "Sweep caught missed file: $fname" "WARN"
+                        invoke_upload "$file"
+                    fi
+                fi
+            done < <(find "${watch_dirs[@]}" -type f -print0 2>/dev/null)
         fi
     done
 }

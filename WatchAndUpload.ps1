@@ -157,6 +157,8 @@ $script:LOG_RETENTION_DAYS = 30
 # In-memory cache for O(1) lookups
 $script:history    = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
 $script:fileLookup = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+$script:pathSize   = New-Object 'System.Collections.Generic.Dictionary[string,long]' ([System.StringComparer]::OrdinalIgnoreCase)
+$script:pathHash   = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([System.StringComparer]::OrdinalIgnoreCase)
 $script:retryMap   = New-Object 'System.Collections.Generic.Dictionary[string,int]' ([System.StringComparer]::OrdinalIgnoreCase)
 $script:inFlight   = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
 
@@ -330,10 +332,16 @@ function Write-Log([string]$msg, [string]$level = "INFO") {
 # CACHE & PRUNE
 # ---------------------------------------------------------------------
 function Load-Cache {
-    $rows = Invoke-SqliteQuery -DataSource $script:DB -Query "SELECT path, file_name, file_size FROM uploads"
+    $rows = Invoke-SqliteQuery -DataSource $script:DB -Query "SELECT path, file_name, file_size, content_hash FROM uploads"
     foreach ($r in $rows) {
         if ($r.path) {
             $script:history.Add($r.path) | Out-Null
+            if ($r.file_size) {
+                $script:pathSize[$r.path] = [long]$r.file_size
+            }
+            if ($r.content_hash) {
+                $script:pathHash[$r.path] = [string]$r.content_hash
+            }
         }
         if ($r.file_name -and $r.file_size) {
             $script:fileLookup.Add("$($r.file_name)|$($r.file_size)") | Out-Null
@@ -389,6 +397,12 @@ function Save-Upload([string]$path, [string]$mediaKey, [string]$fileName = "", [
 
     if ($saved) {
         $script:history.Add($path) | Out-Null
+        if ($fileSize -gt 0) {
+            $script:pathSize[$path] = $fileSize
+        }
+        if ($contentHash) {
+            $script:pathHash[$path] = $contentHash
+        }
         if ($fileName -and $fileSize -gt 0) {
             $script:fileLookup.Add("$fileName|$fileSize") | Out-Null
         }
@@ -478,7 +492,28 @@ function Wait-ForFileReady([string]$path) {
 # DEDUPLICATION CHECKER (Hash-verified to eliminate collisions)
 # ---------------------------------------------------------------------
 function Test-IsDuplicateUpload([string]$filePath) {
-    if ($script:history.Contains($filePath)) { return $true }
+    if ($script:history.Contains($filePath)) {
+        # Verify if file on disk was modified in-place since upload
+        $fiCheck = New-Object System.IO.FileInfo($filePath)
+        if ($fiCheck.Exists) {
+            # Check if file size changed
+            if ($script:pathSize.ContainsKey($filePath) -and $script:pathSize[$filePath] -gt 0) {
+                if ($script:pathSize[$filePath] -ne $fiCheck.Length) {
+                    $null = $script:history.Remove($filePath)
+                    return $false
+                }
+            }
+            # Check if content hash changed
+            if ($script:pathHash.ContainsKey($filePath) -and -not [string]::IsNullOrEmpty($script:pathHash[$filePath])) {
+                $curHash = Get-FileHashSafe $filePath
+                if ($curHash -and $curHash -ne $script:pathHash[$filePath]) {
+                    $null = $script:history.Remove($filePath)
+                    return $false
+                }
+            }
+        }
+        return $true
+    }
 
     $fi = New-Object System.IO.FileInfo($filePath)
     if (-not $fi.Exists) { return $false }
@@ -634,14 +669,10 @@ function Invoke-Upload([string]$path, [int]$current = 1, [int]$total = 1) {
         $doneBar = "#" * $barWidth
 
         # Parse JSON output for success status and diagnostics
-        $isSuccess = ($exitCode -eq 0)
         $mediaKey = ""
         $cliErr = ""
 
         if ($stdout) {
-            if ($stdout -match '"success":\s*true') {
-                $isSuccess = $true
-            }
             if ($stdout -match '"mediaKey":\s*"([^"]+)"') {
                 $mediaKey = $matches[1]
             }
@@ -654,6 +685,11 @@ function Invoke-Upload([string]$path, [int]$current = 1, [int]$total = 1) {
         if (-not $cliErr -and $stderr) {
             $cliErr = $stderr.Trim()
         }
+
+        # Upload is only successful if process exited cleanly with code 0, did not time out, no CLI error was reported,
+        # and output explicitly confirmed success or provided a valid mediaKey.
+        $hasExplicitSuccess = ($stdout -match '"success":\s*true') -or (-not [string]::IsNullOrEmpty($mediaKey))
+        $isSuccess = ($exitCode -eq 0) -and (-not $timedOut) -and (-not $cliErr) -and $hasExplicitSuccess
 
         if ($isSuccess) {
             $contentHash = Get-FileHashSafe $path
@@ -944,6 +980,14 @@ $action = {
     }
 
     if ($shouldProcess) {
+        # Prune debouncer entries older than 60 seconds when table grows
+        if ($script:recentEvents.Count -gt 100) {
+            $cutoff = $now.AddSeconds(-60)
+            $expiredKeys = @($script:recentEvents.Keys | Where-Object { $script:recentEvents[$_] -lt $cutoff })
+            foreach ($k in $expiredKeys) {
+                $null = $script:recentEvents.Remove($k)
+            }
+        }
         Invoke-Upload $evPath 1 1
     }
 }
@@ -973,17 +1017,37 @@ foreach ($dir in $script:WATCH_DIRS) {
 }
 
 # ---------------------------------------------------------------------
-# MAIN LOOP - safety sweep + retry flush every 30 s
+# MAIN LOOP - periodic retry flush (every 30s) + safety sweep (every 15m)
 # ---------------------------------------------------------------------
 try {
     $lastSweep = [DateTime]::MinValue
+    $lastRetryFlush = [DateTime]::MinValue
     while ($true) {
         Start-Sleep -Seconds 2
+        $now = [DateTime]::Now
 
-        if (([DateTime]::Now - $lastSweep).TotalSeconds -ge 30) {
-            $lastSweep = [DateTime]::Now
+        # Periodic Retry queue flush every 30 seconds
+        if (($now - $lastRetryFlush).TotalSeconds -ge 30) {
+            $lastRetryFlush = $now
+            foreach ($qf in @($script:retryMap.Keys)) {
+                if ($script:history.Contains($qf)) {
+                    Remove-Retry $qf
+                    continue
+                }
+                if ([System.IO.File]::Exists($qf)) {
+                    if (-not $script:inFlight.Contains($qf)) {
+                        Invoke-Upload $qf 1 1
+                    }
+                } else {
+                    # File was deleted or moved - purge from retry queue
+                    Remove-Retry $qf
+                }
+            }
+        }
 
-            # Safety sweep
+        # Recursive filesystem safety sweep every 15 minutes (900 seconds)
+        if (($now - $lastSweep).TotalSeconds -ge 900) {
+            $lastSweep = $now
             foreach ($dir in $script:WATCH_DIRS) {
                 try {
                     Get-ChildItem -LiteralPath $dir -File -Recurse -ErrorAction SilentlyContinue |
@@ -998,22 +1062,6 @@ try {
                         }
                 } catch {
                     Write-Log "Sweep error in $dir - $_" "WARN"
-                }
-            }
-
-            # Retry queue flush
-            foreach ($qf in @($script:retryMap.Keys)) {
-                if ($script:history.Contains($qf)) {
-                    Remove-Retry $qf
-                    continue
-                }
-                if ([System.IO.File]::Exists($qf)) {
-                    if (-not $script:inFlight.Contains($qf)) {
-                        Invoke-Upload $qf 1 1
-                    }
-                } else {
-                    # File was deleted or moved - purge from retry queue
-                    Remove-Retry $qf
                 }
             }
         }

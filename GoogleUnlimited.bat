@@ -28,7 +28,7 @@ echo   [6] Disable Auto-Start on Windows Boot
 echo   [7] Stop Background Watcher
 echo   [8] Manage Watched Folders (Add/List custom folders)
 echo   [9] Manage Google Accounts (List/Switch account)
-echo   [10] Force Re-scan & Sync All Media
+echo   [10] Force Re-scan ^& Sync All Media
 echo   [0] Exit
 echo ==========================================================
 set "choice="
@@ -46,7 +46,7 @@ if "%choice%"=="9" goto manage_account
 if "%choice%"=="10" goto force_resync
 if "%choice%"=="0" exit /b 0
 echo Invalid option.
-timeout /t 2 >nul
+timeout /t 2 >nul 2>&1 || ping -n 3 127.0.0.1 >nul
 goto menu
 
 :handle_arg
@@ -90,45 +90,61 @@ if "%IS_MENU%"=="1" (pause & goto menu)
 exit /b %ERRORLEVEL%
 
 :run_watcher_arg
+set "EXTRA_ARGS="
+:strip_loop
 shift
-%PS_CMD% -File "%~dp0WatchAndUpload.ps1" %*
+if "%~1"=="" goto run_watcher_exec
+if not defined EXTRA_ARGS (
+    set "EXTRA_ARGS="%~1""
+) else (
+    set "EXTRA_ARGS=%EXTRA_ARGS% "%~1""
+)
+goto strip_loop
+
+:run_watcher_exec
+if defined EXTRA_ARGS (
+    %PS_CMD% -File "%~dp0WatchAndUpload.ps1" %EXTRA_ARGS%
+) else (
+    %PS_CMD% -File "%~dp0WatchAndUpload.ps1"
+)
 exit /b %ERRORLEVEL%
+
 
 :run_silent
 if "%IS_MENU%"=="1" cls
 echo Launching Google Photos watcher in silent background mode...
 wscript.exe "%~dp0StartPhotosWatcher.vbs"
 echo [OK] Background watcher launched.
-if "%IS_MENU%"=="1" (timeout /t 3 >nul & goto menu)
+if "%IS_MENU%"=="1" ((timeout /t 3 >nul 2>&1 || ping -n 4 127.0.0.1 >nul) & goto menu)
 exit /b 0
 
 :check_status
 if "%IS_MENU%"=="1" cls
-%PS_CMD% -Command "& { & '%~dp0WatchAndUpload.ps1' -StatusOnly }"
+%PS_CMD% -File "%~dp0WatchAndUpload.ps1" -StatusOnly
 if "%IS_MENU%"=="1" (pause & goto menu)
 exit /b %ERRORLEVEL%
 
 :view_logs
 if "%IS_MENU%"=="1" cls
-%PS_CMD% -Command "& { & '%~dp0WatchAndUpload.ps1' -ShowLogs }"
+%PS_CMD% -File "%~dp0WatchAndUpload.ps1" -ShowLogs
 if "%IS_MENU%"=="1" (pause & goto menu)
 exit /b %ERRORLEVEL%
 
 :enable_startup
 if "%IS_MENU%"=="1" cls
-%PS_CMD% -Command "& { & '%~dp0WatchAndUpload.ps1' -EnableStartup }"
+%PS_CMD% -File "%~dp0WatchAndUpload.ps1" -EnableStartup
 if "%IS_MENU%"=="1" (pause & goto menu)
 exit /b %ERRORLEVEL%
 
 :disable_startup
 if "%IS_MENU%"=="1" cls
-%PS_CMD% -Command "& { & '%~dp0WatchAndUpload.ps1' -DisableStartup }"
+%PS_CMD% -File "%~dp0WatchAndUpload.ps1" -DisableStartup
 if "%IS_MENU%"=="1" (pause & goto menu)
 exit /b %ERRORLEVEL%
 
 :stop_watcher
 if "%IS_MENU%"=="1" cls
-%PS_CMD% -Command "& { & '%~dp0WatchAndUpload.ps1' -StopWatcher }"
+%PS_CMD% -File "%~dp0WatchAndUpload.ps1" -StopWatcher
 if "%IS_MENU%"=="1" (pause & goto menu)
 exit /b %ERRORLEVEL%
 
@@ -141,8 +157,9 @@ set "WATCH_CONF=%~dp0watch_dirs.txt"
 if exist "%WATCH_CONF%" (
     echo Current custom watch folders in watch_dirs.txt:
     type "%WATCH_CONF%"
-) else (
-    echo No custom folders configured yet (using standard user and cloud folders).
+)
+if not exist "%WATCH_CONF%" (
+    echo No custom folders configured yet [using standard user and cloud folders].
 )
 echo.
 echo Options:
@@ -152,24 +169,29 @@ echo   [0] Back to main menu
 echo ==========================================================
 set "fchoice="
 set /p "fchoice=Select an option [0-2]: "
-if "%fchoice%"=="1" (
-    echo.
-    set "newdir="
-    set /p "newdir=Enter full path of folder to watch: "
-    if not "%newdir%"=="" (
-        echo %newdir%>> "%WATCH_CONF%"
-        echo [OK] Added folder: %newdir%
-    )
-    timeout /t 2 >nul
-    goto manage_folders
+if "%fchoice%"=="1" goto add_watch_folder
+if "%fchoice%"=="2" goto clear_watch_folders
+if "%fchoice%"=="0" goto menu
+echo Invalid option.
+timeout /t 2 >nul 2>&1 || ping -n 3 127.0.0.1 >nul
+goto manage_folders
+
+:add_watch_folder
+echo.
+set "newdir="
+set /p "newdir=Enter full path of folder to watch: "
+if not "%newdir%"=="" (
+    >>"%WATCH_CONF%" echo %newdir%
+    echo [OK] Added folder: %newdir%
 )
-if "%fchoice%"=="2" (
-    if exist "%WATCH_CONF%" del "%WATCH_CONF%"
-    echo [OK] Custom watch folders cleared.
-    timeout /t 2 >nul
-    goto manage_folders
-)
-goto menu
+timeout /t 2 >nul 2>&1 || ping -n 3 127.0.0.1 >nul
+goto manage_folders
+
+:clear_watch_folders
+if exist "%WATCH_CONF%" del "%WATCH_CONF%"
+echo [OK] Custom watch folders cleared.
+timeout /t 2 >nul 2>&1 || ping -n 3 127.0.0.1 >nul
+goto manage_folders
 
 :manage_account
 cls
@@ -178,7 +200,8 @@ echo   *  Google Photos Account Management
 echo ==========================================================
 if exist "%~dp0gotohp-cli-x64.exe" (
     "%~dp0gotohp-cli-x64.exe" --config "%~dp0gotohp.config" creds list
-) else (
+)
+if not exist "%~dp0gotohp-cli-x64.exe" (
     echo gotohp-cli-x64.exe not found.
 )
 echo.
@@ -189,25 +212,31 @@ echo   [0] Back to main menu
 echo ==========================================================
 set "acchoice="
 set /p "acchoice=Select an option [0-2]: "
-if "%acchoice%"=="1" (
-    set "acemail="
-    set /p "acemail=Enter email address to set active: "
-    if not "%acemail%"=="" (
-        "%~dp0gotohp-cli-x64.exe" --config "%~dp0gotohp.config" creds set %acemail%
-    )
-    pause
-    goto manage_account
+if "%acchoice%"=="1" goto switch_account
+if "%acchoice%"=="2" goto open_account_gui
+if "%acchoice%"=="0" goto menu
+echo Invalid option.
+timeout /t 2 >nul 2>&1 || ping -n 3 127.0.0.1 >nul
+goto manage_account
+
+:switch_account
+echo.
+set "acemail="
+set /p "acemail=Enter email address to set active: "
+if not "%acemail%"=="" (
+    "%~dp0gotohp-cli-x64.exe" --config "%~dp0gotohp.config" creds set %acemail%
 )
-if "%acchoice%"=="2" (
-    if exist "%~dp0gotohp-x64.exe" start "" "%~dp0gotohp-x64.exe"
-    pause
-    goto manage_account
-)
-goto menu
+pause
+goto manage_account
+
+:open_account_gui
+if exist "%~dp0gotohp-x64.exe" start "" "%~dp0gotohp-x64.exe"
+pause
+goto manage_account
 
 :force_resync
 if "%IS_MENU%"=="1" cls
-echo Starting full scan & force re-sync of all media...
+echo Starting full scan ^& force re-sync of all media...
 %PS_CMD% -File "%~dp0WatchAndUpload.ps1" -ForceResync
 if "%IS_MENU%"=="1" (pause & goto menu)
 exit /b %ERRORLEVEL%

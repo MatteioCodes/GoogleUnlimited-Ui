@@ -141,8 +141,9 @@ chmod +x google-unlimited.sh
    - Copy the value of the **`oauth_token`** cookie.
 4. In your terminal, run:
    ```bash
-   ./google-unlimited.sh creds add "<oauth_token>"
+   ./google-unlimited.sh creds add
    ```
+   *(When prompted, paste your `oauth_token`. Input is hidden for security so your token is never exposed in shell history or process listings).*
 
 *(Alternatively: If you already signed in on Windows or Linux, simply copy `gotohp.config` into this directory).*
 

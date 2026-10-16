@@ -11,6 +11,7 @@ TEST_FILES=(
     "test_dedup.sh"
     "test_permissions.sh"
     "test_process_stop.sh"
+    "test_upload_verification.sh"
 )
 
 TOTAL_PASSED=0
