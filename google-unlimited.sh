@@ -8,7 +8,31 @@ set -u
 umask 077
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+RESOURCE_DIR="$SCRIPT_DIR"
+SCRIPT_DIR="${GOOGLE_UNLIMITED_DATA_DIR:-$SCRIPT_DIR}"
+mkdir -p "$SCRIPT_DIR"
 DB="$SCRIPT_DIR/gphotos.db"
+APP_MODE="${GOOGLE_UNLIMITED_APP_MODE:-0}"
+BACKUP_ACCOUNT="${GOOGLE_UNLIMITED_ACCOUNT:-}"
+
+# Machine-readable lifecycle events; the terminal interface stays unchanged.
+app_status() {
+    [ "$APP_MODE" = "1" ] || return 0
+    local encoded=""
+    [ -n "${2:-}" ] && encoded="$(printf '%s' "$2" | base64 | tr -d '\r\n')"
+    printf '@@GoogleUnlimited:%s:%s\n' "$1" "$encoded"
+}
+
+is_selected_path() {
+    [ ! -f "$SCRIPT_DIR/watch_dirs.txt" ] && return 0
+    local selected
+    while IFS= read -r selected || [ -n "$selected" ]; do
+        [ -z "$selected" ] && continue
+        case "$selected" in \#*) continue ;; esac
+        case "$1" in "$selected"/*) return 0 ;; esac
+    done < "$SCRIPT_DIR/watch_dirs.txt"
+    return 1
+}
 PID_FILE="$SCRIPT_DIR/.watcher.pid"
 SERVICE_NAME="google-unlimited.service"
 USER_SYSTEMD_DIR="$HOME/.config/systemd/user"
@@ -118,11 +142,15 @@ do_verify() {
 # BINARY & CONFIG DISCOVERY
 # ---------------------------------------------------------------------
 get_gotohp_bin() {
-    local cands=("$SCRIPT_DIR/gotohp-cli")
+    if [ -n "${GOOGLE_UNLIMITED_ENGINE:-}" ]; then
+        [ -s "$GOOGLE_UNLIMITED_ENGINE" ] && printf '%s\n' "$GOOGLE_UNLIMITED_ENGINE"
+        return
+    fi
+    local cands=("$RESOURCE_DIR/gotohp-cli")
     if [ "$OS" = "Darwin" ]; then
-        cands+=("$SCRIPT_DIR/gotohp-cli-macos-universal" "$SCRIPT_DIR/gotohp-cli-macos")
+        cands+=("$RESOURCE_DIR/gotohp-cli-macos-universal" "$RESOURCE_DIR/gotohp-cli-macos")
     else
-        cands+=("$SCRIPT_DIR/gotohp-cli_amd64" "$SCRIPT_DIR/gotohp-cli_arm64")
+        cands+=("$RESOURCE_DIR/gotohp-cli_amd64" "$RESOURCE_DIR/gotohp-cli_arm64")
     fi
 
     for cand in "${cands[@]}"; do
@@ -134,7 +162,7 @@ get_gotohp_bin() {
     done
 
     # Fallback to any other gotohp-cli binary in SCRIPT_DIR
-    for cand in "$SCRIPT_DIR"/gotohp-cli*; do
+    for cand in "$RESOURCE_DIR"/gotohp-cli*; do
         if [ -s "$cand" ] && [ "$cand" != "$SCRIPT_DIR/gotohp.config" ]; then
             chmod +x "$cand" 2>/dev/null || true
             echo "$cand"
@@ -173,7 +201,7 @@ run_gotohp() {
         exit 1
     fi
     local cmd=("$bin")
-    if [ -f "$SCRIPT_DIR/gotohp.config" ]; then
+    if [ "$APP_MODE" = "1" ] || [ -f "$SCRIPT_DIR/gotohp.config" ]; then
         cmd+=("--config" "$SCRIPT_DIR/gotohp.config")
     fi
     "${cmd[@]}" "$@"
@@ -202,6 +230,7 @@ init_db() {
     fi
 
     sqlite3 "$DB" >/dev/null << 'EOF'
+PRAGMA busy_timeout=10000;
 PRAGMA journal_mode=WAL;
 PRAGMA synchronous=NORMAL;
 
@@ -352,7 +381,9 @@ flush_retry_queue() {
     [ -z "$retry_list" ] && return
     while IFS= read -r rfile; do
         [ -z "$rfile" ] && continue
-        if [ -f "$rfile" ]; then
+        if ! is_selected_path "$rfile"; then
+            remove_retry "$rfile"
+        elif [ -f "$rfile" ]; then
             local rfname
             rfname="$(basename "$rfile")"
             local rsize_bytes
@@ -912,6 +943,12 @@ invoke_upload() {
     local fpath="$1"
     [ -d "$fpath" ] && return
     [ ! -f "$fpath" ] && return
+    [ -L "$fpath" ] && return
+    is_selected_path "$fpath" || return
+    local escaped_retry="${fpath//\'/\'\'}"
+    local previous_attempts
+    previous_attempts=$(sqlite3 "$DB" "SELECT attempts FROM retry_queue WHERE path = '$escaped_retry';" 2>/dev/null || true)
+    [ "${previous_attempts:-0}" -ge 3 ] && return
     case "$fpath" in
         */Modules/*) return ;;
         *.db|*.db-wal|*.db-shm|*.config|*.tmp|*.crdownload|*.part) return ;;
@@ -937,6 +974,7 @@ invoke_upload() {
     echo "[$(date '+%H:%M:%S')] Detected  : $fname (${size_mb} MB)"
     echo "             Path      : $fpath"
 
+    app_status settling "$fpath"
     wait_for_file_ready "$fpath"
     local status=$?
     local escaped_path="${fpath//\'/\'\'}"
@@ -956,7 +994,10 @@ invoke_upload() {
     local start_time
     start_time=$(date +%s)
     local output
-    output="$(run_gotohp upload --no-tui "$fpath" 2>&1)"
+    app_status uploading "$fpath"
+    local upload_args=(upload --no-tui)
+    [ -n "$BACKUP_ACCOUNT" ] && upload_args+=(--account "$BACKUP_ACCOUNT")
+    output="$(run_gotohp "${upload_args[@]}" "$fpath" 2>&1)"
     local exit_code=$?
     local end_time
     end_time=$(date +%s)
@@ -990,7 +1031,7 @@ invoke_upload() {
         attempts=$((attempts + 1))
         if [ "$attempts" -ge 3 ]; then
             write_log "GAVE UP after $attempts upload attempts: $fname$err_suffix" "ERROR"
-            remove_retry "$fpath"
+            save_retry "$fpath" "$attempts"
         else
             write_log "FAILED upload$err_suffix (attempt $attempts/3) - queued for retry: $fname" "WARN"
             save_retry "$fpath" "$attempts"
@@ -1000,6 +1041,27 @@ invoke_upload() {
 
 # shellcheck disable=SC2120
 do_watch() {
+    # A profile is owned by one native watcher, including its startup scan.
+    if command -v flock >/dev/null 2>&1; then
+        exec 8>"$SCRIPT_DIR/.watcher.lock"
+        if ! flock -n 8; then
+            app_status locked
+            echo "Another instance is already running." >&2
+            return 1
+        fi
+    fi
+    local watcher_pid=""
+    local events="$SCRIPT_DIR/.watcher-events.$$"
+    cleanup() {
+        trap - SIGINT SIGTERM EXIT
+        [ -n "$watcher_pid" ] && kill "$watcher_pid" 2>/dev/null || true
+        [ -n "$watcher_pid" ] && wait "$watcher_pid" 2>/dev/null || true
+        rm -f "$PID_FILE" "$events"
+        app_status paused
+    }
+    trap 'cleanup; exit 0' SIGINT SIGTERM
+    trap cleanup EXIT
+    echo "$$" > "$PID_FILE"
     init_db
 
     # Check credentials
@@ -1088,6 +1150,11 @@ do_watch() {
     done
     watch_dirs=("${unique_dirs[@]}")
 
+    if [ ${#watch_dirs[@]} -eq 0 ] && { [ -f "$SCRIPT_DIR/watch_dirs.txt" ] || [ "$APP_MODE" = "1" ]; }; then
+        app_status unavailable
+        echo "No selected folders are available." >&2
+        return 1
+    fi
     if [ ${#watch_dirs[@]} -eq 0 ]; then
         mkdir -p "$HOME/Pictures"
         watch_dirs=("$HOME/Pictures")
@@ -1105,6 +1172,7 @@ do_watch() {
     done
     echo -e "${CYAN}==========================================================${NC}"
 
+    app_status scanning
     # Phase 1: Startup Scan
     echo -e "${CYAN}[Phase 1] Scanning for unrecorded files...${NC}"
     local file_count=0
@@ -1130,74 +1198,50 @@ do_watch() {
         echo -e "${GREEN}[Phase 1] [OK] Startup sync complete ($file_count file(s)).${NC}"
     fi
 
-    # Phase 2: Real-time Watcher
-    echo "$$" > "$PID_FILE"
-    local watcher_pid=""
+    # One consumer owns uploads, retries and sweeps, avoiding overlapping CLI calls.
+    mkfifo "$events"
+    exec 9<>"$events"
     if [ "$OS" = "Darwin" ]; then
-        echo ""
-        echo -e "${YELLOW}[Phase 2] Real-time watcher active (fswatch).${NC}"
-        echo "  Waiting for new media... Press Ctrl+C to stop."
-
-        fswatch -r -e "/\\." "${watch_dirs[@]}" 2>/dev/null | while IFS= read -r new_path; do
-            invoke_upload "$new_path"
-        done &
-        watcher_pid=$!
+        fswatch -r -e "/\\." "${watch_dirs[@]}" > "$events" 2>/dev/null &
     else
-        echo ""
-        echo -e "${YELLOW}[Phase 2] Real-time watcher active (inotifywait).${NC}"
-        echo "  Waiting for new media... Press Ctrl+C to stop."
-
-        inotifywait -m -r -e close_write,moved_to,create --format '%w%f' "${watch_dirs[@]}" 2>/dev/null | while IFS= read -r new_path; do
-            invoke_upload "$new_path"
-        done &
-        watcher_pid=$!
+        inotifywait -m -r -e close_write,moved_to,create --format '%w%f' "${watch_dirs[@]}" > "$events" 2>/dev/null &
     fi
-
-    cleanup() {
-        trap - SIGINT SIGTERM EXIT
-        echo ""
-        echo "Stopping watcher..."
-        rm -f "$PID_FILE" 2>/dev/null || true
-        if [ -n "${watcher_pid:-}" ]; then
-            pkill -P "$watcher_pid" 2>/dev/null || true
-            kill "$watcher_pid" 2>/dev/null || true
-        fi
-        if [ "$OS" = "Darwin" ]; then
-            pkill -f "fswatch.*$SCRIPT_DIR" 2>/dev/null || true
-        else
-            pkill -f "inotifywait.*${watch_dirs[0]}" 2>/dev/null || true
-        fi
-        exit 0
-    }
-    trap cleanup SIGINT SIGTERM EXIT
-
-    # Phase 2: periodic retry queue processor (every 30s) and safety sweep (every 15m / 900s)
-    local last_sweep=0
+    watcher_pid=$!
+    echo "[Phase 2] Real-time watcher active."
+    app_status watching
+    local last_retry last_sweep
+    last_retry=$(date +%s)
+    last_sweep=$last_retry
     while kill -0 "$watcher_pid" 2>/dev/null; do
-        sleep 30
+        local new_path=""
+        if IFS= read -r -t 1 -u 9 new_path; then
+            if [ -d "$new_path" ]; then
+                while IFS= read -r -d '' file; do
+                    invoke_upload "$file"
+                done < <(find "$new_path" -type f -print0 2>/dev/null)
+            else
+                invoke_upload "$new_path"
+            fi
+            app_status watching
+        fi
         local now
         now=$(date +%s)
-
-        # Flush retry queue every 30s
-        flush_retry_queue
-
-        # Safety sweep for missed files every 900s (15 minutes)
+        if [ $((now - last_retry)) -ge 30 ]; then
+            last_retry=$now
+            flush_retry_queue
+            app_status watching
+        fi
         if [ $((now - last_sweep)) -ge 900 ]; then
             last_sweep=$now
+            app_status scanning
             while IFS= read -r -d '' file; do
-                if is_media_file "$file"; then
-                    local fname
-                    fname="$(basename "$file")"
-                    local size_bytes
-                    size_bytes=$(stat -c%s "$file" 2>/dev/null || stat -f%z "$file" 2>/dev/null || echo 0)
-                    if ! is_uploaded "$file" "$fname" "$size_bytes"; then
-                        write_log "Sweep caught missed file: $fname" "WARN"
-                        invoke_upload "$file"
-                    fi
-                fi
+                invoke_upload "$file"
             done < <(find "${watch_dirs[@]}" -type f -print0 2>/dev/null)
+            app_status watching
         fi
     done
+    app_status error
+    return 1
 }
 
 # ---------------------------------------------------------------------
@@ -1309,6 +1353,10 @@ case "$CMD" in
     watch|--watch|run|--run)
         shift || true
         do_watch "$@"
+        ;;
+    retry)
+        init_db
+        sqlite3 "$DB" "UPDATE retry_queue SET attempts=0, last_attempt=NULL;"
         ;;
     status|--status|-s)
         do_status

@@ -1,0 +1,77 @@
+{
+  "pythonVersion": "3.14.8",
+  "linux": {
+    "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20261013/cpython-3.14.8%2B20261013-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz",
+    "sha256": "d8faa1b588506b9e3e5a3f57807bb056d534a1641a6b10d15b6ea3f0b413b960"
+  },
+  "win": {
+    "url": "https://www.python.org/ftp/python/3.14.8/python-3.14.8-embed-amd64.zip",
+    "sha256": "a93abe456ab01bd96d7a085b3cdb6566b3063f4241360d114142fbdb07f0a310"
+  },
+  "pillowLinux": {
+    "url": "https://files.pythonhosted.org/packages/5c/44/c85361f65dbe00eea8576ee467c768d25129989efb76e94f205e9ca9bb46/pillow-12.3.0-cp314-cp314-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl",
+    "sha256": "251bf95b67017e27b13d82f5b326234ca62d70f9cf4c2b9032de2358a3b12c7b"
+  },
+  "pillowWin": {
+    "url": "https://files.pythonhosted.org/packages/f1/e0/492879f69d94f91f60fc8cd05ba03650e9520afebb2fb7aa12777d7c7f38/pillow-12.3.0-cp314-cp314-win_amd64.whl",
+    "sha256": "fdafc9cce40277e0f7a0feabce0ee50dd2fa1800f3b38015e51296b5e814048d"
+  },
+  "linuxBackendTools": {
+    "libreadline8": {
+      "url": "https://archive.ubuntu.com/ubuntu/pool/main/r/readline/libreadline8_8.1.2-1_amd64.deb",
+      "sha256": "51fd16f608efa710c987e4b071ffba0bec63a9ac8e55eddd5770f5e5252edc09",
+      "version": "8.1.2-1"
+    },
+    "libsqlite3-0": {
+      "url": "https://archive.ubuntu.com/ubuntu/pool/main/s/sqlite3/libsqlite3-0_3.37.2-2ubuntu0.8_amd64.deb",
+      "sha256": "6e22b1e8d375fed6a1d52cad5887e762b6cdeaba137595e726c95486968dfab5",
+      "version": "3.37.2-2ubuntu0.8"
+    },
+    "libtinfo6": {
+      "url": "https://archive.ubuntu.com/ubuntu/pool/main/n/ncurses/libtinfo6_6.3-2ubuntu0.3_amd64.deb",
+      "sha256": "3b8dff43a31168f5020928f2ab9a97324c5b47ae708311781f6bd01306c96214",
+      "version": "6.3-2ubuntu0.3"
+    },
+    "sqlite3": {
+      "url": "https://archive.ubuntu.com/ubuntu/pool/main/s/sqlite3/sqlite3_3.37.2-2ubuntu0.8_amd64.deb",
+      "sha256": "76626c2071bd7da459c04494e2f0d563661fa27b121d6f492266e2c9e993c930",
+      "version": "3.37.2-2ubuntu0.8"
+    },
+    "inotify-tools": {
+      "url": "https://archive.ubuntu.com/ubuntu/pool/universe/i/inotify-tools/inotify-tools_3.22.1.0-2_amd64.deb",
+      "sha256": "68a8e2b77b3e6a7f0b3dfdb05abe49835062700d23a0b0521451568dbb36d1d3",
+      "version": "3.22.1.0-2"
+    },
+    "libinotifytools0": {
+      "url": "https://archive.ubuntu.com/ubuntu/pool/universe/i/inotify-tools/libinotifytools0_3.22.1.0-2_amd64.deb",
+      "sha256": "8af1c9ba8bd9e87bb65abd6390a25c1de9d1af1641277c09d467d54739359b6b",
+      "version": "3.22.1.0-2"
+    }
+  },
+  "linuxBackendSources": [
+    {
+      "url": "https://archive.ubuntu.com/ubuntu/pool/universe/i/inotify-tools/inotify-tools_3.22.1.0.orig.tar.gz",
+      "sha256": "da81010756866966e6dfb1521c2be2f0946e7626fa29122e1672dc654fc89ff3"
+    },
+    {
+      "url": "https://archive.ubuntu.com/ubuntu/pool/universe/i/inotify-tools/inotify-tools_3.22.1.0-2.debian.tar.xz",
+      "sha256": "9477819ce026d61d7564c31e3a640eb31539d0c13e36fbcfdc1a2d3502776d96"
+    },
+    {
+      "url": "https://archive.ubuntu.com/ubuntu/pool/universe/i/inotify-tools/inotify-tools_3.22.1.0-2.dsc",
+      "sha256": "5abad5a935edd7b1c050634bc8820b8ea79951b6a72ec9d1cccc56cad1e12153"
+    },
+    {
+      "url": "https://archive.ubuntu.com/ubuntu/pool/main/r/readline/readline_8.1.2.orig.tar.gz",
+      "sha256": "7589a2381a8419e68654a47623ce7dfcb756815c8fee726b98f90bf668af7bc6"
+    },
+    {
+      "url": "https://archive.ubuntu.com/ubuntu/pool/main/r/readline/readline_8.1.2-1.debian.tar.xz",
+      "sha256": "0c39840fbed2abd3f93083d75c974e39855fd41aa6df5fa1be06d147e86071ca"
+    },
+    {
+      "url": "https://archive.ubuntu.com/ubuntu/pool/main/r/readline/readline_8.1.2-1.dsc",
+      "sha256": "8558058b41165ffbbf406e744e726326e649a55c0f2c1490a467c01d314adec2"
+    }
+  ]
+}

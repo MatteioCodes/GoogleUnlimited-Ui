@@ -17,7 +17,11 @@ param(
     [string]$AddWatchDir = "",
     [string]$RemoveWatchDir = "",
     [switch]$ResetWatchDirs,
-    [switch]$ListWatchDirs
+    [switch]$ListWatchDirs,
+    [string]$DataDir = "",
+    [string]$EnginePath = "",
+    [switch]$AppMode,
+    [switch]$RetryFailed
 )
 $ErrorActionPreference = "Stop"
 
@@ -32,6 +36,34 @@ if (-not $script:BASE) {
     $script:BASE = (Get-Location).Path
 }
 
+$script:RESOURCE_BASE = $script:BASE
+if ($DataDir) {
+    $script:BASE = [System.IO.Path]::GetFullPath($DataDir)
+    [System.IO.Directory]::CreateDirectory($script:BASE) | Out-Null
+}
+$script:stopFile = Join-Path $script:BASE ".app-stop"
+if ($AppMode) {
+    [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
+    $ProgressPreference = "SilentlyContinue"
+}
+function Write-AppStatus([string]$phase, [string]$path = "") {
+    if ($AppMode) {
+        $encoded = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($path))
+        [Console]::WriteLine("@@GoogleUnlimited:${phase}:$encoded")
+    }
+}
+function Test-AppStop {
+    return $AppMode -and [System.IO.File]::Exists($script:stopFile)
+}
+function Test-SelectedPath([string]$path) {
+    if (-not $AppMode) { return $true }
+    foreach ($folder in $script:WATCH_DIRS) {
+        $prefix = $folder.TrimEnd('\', '/') + [System.IO.Path]::DirectorySeparatorChar
+        if ($path.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)) { return $true }
+    }
+    return $false
+}
+
 $script:DB = Join-Path $script:BASE "gphotos.db"
 
 # Discover gotohp-cli executable
@@ -44,7 +76,7 @@ $binCandidates = @(
 )
 
 foreach ($cand in $binCandidates) {
-    $testPath = Join-Path $script:BASE $cand
+    $testPath = Join-Path $script:RESOURCE_BASE $cand
     if ([System.IO.File]::Exists($testPath)) {
         $script:GOTOHP = $testPath
         break
@@ -62,10 +94,12 @@ if (-not $script:GOTOHP) {
     }
 }
 
+if ($EnginePath) { $script:GOTOHP = [System.IO.Path]::GetFullPath($EnginePath) }
+
 # Discover portable configuration
 $script:CONFIG_ARGS = @()
 $portableConfig = Join-Path $script:BASE "gotohp.config"
-if ([System.IO.File]::Exists($portableConfig)) {
+if ($AppMode -or [System.IO.File]::Exists($portableConfig)) {
     $script:CONFIG_ARGS = @("--config", $portableConfig)
 }
 
@@ -551,7 +585,7 @@ $script:instanceMutex = $null
 $script:hasInstanceMutex = $false
 
 # Diagnostic/management commands do not start background work and should not be blocked
-if (-not ($StatusOnly -or $ShowLogs -or $CheckRunning -or $ManageDirs -or $AddWatchDir -or $RemoveWatchDir -or $ResetWatchDirs -or $ListWatchDirs)) {
+if (-not ($RetryFailed -or $StatusOnly -or $ShowLogs -or $CheckRunning -or $ManageDirs -or $AddWatchDir -or $RemoveWatchDir -or $ResetWatchDirs -or $ListWatchDirs)) {
     $cleanBase = $script:BASE.ToLower().Replace("\", "_").Replace(":", "").Replace(" ", "_")
     $script:instanceMutexName = "Local\GoogleUnlimited_Watcher_" + $cleanBase
 
@@ -576,6 +610,8 @@ if (-not ($StatusOnly -or $ShowLogs -or $CheckRunning -or $ManageDirs -or $AddWa
             try { $script:instanceMutex.Dispose() } catch {}
             $script:instanceMutex = $null
         }
+        Write-AppStatus "locked"
+        if ($AppMode) { exit 1 }
         exit 0
     }
 }
@@ -782,8 +818,8 @@ public static class Win32IoHelper {
     # -----------------------------------------------------------------
     if (-not (Get-Module -Name PSSQLite)) {
         $modulePaths = @(
-            (Join-Path $script:BASE "Modules\PSSQLite\PSSQLite.psd1"),
-            (Join-Path $script:BASE "Modules\PSSQLite\1.1.0\PSSQLite.psd1"),
+            (Join-Path $script:RESOURCE_BASE "Modules\PSSQLite\PSSQLite.psd1"),
+            (Join-Path $script:RESOURCE_BASE "Modules\PSSQLite\1.1.0\PSSQLite.psd1"),
             (Join-Path $env:USERPROFILE "Documents\PowerShell\Modules\PSSQLite\1.1.0\PSSQLite.psd1"),
             (Join-Path $env:USERPROFILE "Documents\PowerShell\Modules\PSSQLite\PSSQLite.psd1"),
             (Join-Path $env:USERPROFILE "Documents\WindowsPowerShell\Modules\PSSQLite\1.1.0\PSSQLite.psd1"),
@@ -806,6 +842,7 @@ public static class Win32IoHelper {
 
     # Fallback installer if running on a fresh PC without bundled modules
     if (-not (Get-Command -Name Invoke-SqliteQuery -ErrorAction SilentlyContinue)) {
+        if ($AppMode) { throw "The bundled SQLite module is missing. Reinstall the app." }
         Write-Host "[Setup] SQLite module not detected. Installing automatically..." -ForegroundColor Yellow
         try {
             Install-Module -Name PSSQLite -Force -Scope CurrentUser -ErrorAction Stop
@@ -1016,6 +1053,7 @@ CREATE INDEX IF NOT EXISTS idx_logs_level ON logs(level);
         $lastSize = -1
 
         for ($i = 0; $i -lt 30; $i++) {
+            if (Test-AppStop) { return "CANCELLED" }
             try {
                 if (-not [System.IO.File]::Exists($path)) { return "NOT_FOUND" }
                 $info = New-Object System.IO.FileInfo($path)
@@ -1109,6 +1147,10 @@ CREATE INDEX IF NOT EXISTS idx_logs_level ON logs(level);
     }
 
     function Test-IsEligibleMedia([System.IO.FileInfo]$fi) {
+        if (Test-AppStop) { return $false }
+        if (-not (Test-SelectedPath $fi.FullName)) { return $false }
+        if (($fi.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { return $false }
+        if ($script:retryMap.ContainsKey($fi.FullName) -and $script:retryMap[$fi.FullName] -ge $script:MAX_RETRY) { return $false }
         if (-not $script:EXT.Contains($fi.Extension.ToLower())) { return $false }
         if ($fi.FullName.Contains("\Modules\")) { return $false }
         if ($script:inFlight.Contains($fi.FullName)) { return $false }
@@ -1117,6 +1159,8 @@ CREATE INDEX IF NOT EXISTS idx_logs_level ON logs(level);
     }
 
     function Invoke-Upload([string]$path, [int]$current = 1, [int]$total = 1) {
+        if ((Test-AppStop) -or -not (Test-SelectedPath $path)) { return }
+        if ($script:retryMap.ContainsKey($path) -and $script:retryMap[$path] -ge $script:MAX_RETRY) { return }
         if ($path.Contains("\Modules\")) { return }
         $ext = [System.IO.Path]::GetExtension($path).ToLower()
         if (-not $script:EXT.Contains($ext)) { return }
@@ -1140,7 +1184,9 @@ CREATE INDEX IF NOT EXISTS idx_logs_level ON logs(level);
             Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Detected  : $name ($sizeLabel)" -ForegroundColor Cyan
             Write-Host "             Path      : $path"                               -ForegroundColor DarkGray
 
+            Write-AppStatus "settling" $path
             $status = Wait-ForFileReady $path
+            if ($status -eq "CANCELLED") { return }
             if ($status -ne "READY") {
                 if ($status -eq "NOT_FOUND") {
                     Remove-Retry $path
@@ -1183,6 +1229,7 @@ CREATE INDEX IF NOT EXISTS idx_logs_level ON logs(level);
             $psi.RedirectStandardOutput = $true
             $psi.RedirectStandardError = $true
 
+            Write-AppStatus "uploading" $path
             $proc = [System.Diagnostics.Process]::Start($psi)
             $script:currentUploadProc = $proc
             $sw = [System.Diagnostics.Stopwatch]::StartNew()
@@ -1206,6 +1253,14 @@ CREATE INDEX IF NOT EXISTS idx_logs_level ON logs(level);
 
             try {
                 while (-not $proc.WaitForExit(150)) {
+                    if (Test-AppStop) {
+                        $proc.Kill()
+                        $proc.WaitForExit()
+                        $prevAttempts = 0
+                        if ($script:retryMap.ContainsKey($path)) { $prevAttempts = $script:retryMap[$path] }
+                        Save-Retry $path $prevAttempts
+                        return
+                    }
                     $elapsedSec = $sw.Elapsed.TotalSeconds
                     if ($elapsedSec -ge $timeoutSeconds) {
                         $timedOut = $true
@@ -1315,7 +1370,7 @@ CREATE INDEX IF NOT EXISTS idx_logs_level ON logs(level);
 
                 if ($attempts -ge $script:MAX_RETRY) {
                     Write-Log "GAVE UP after $attempts upload attempts: $name" "ERROR"
-                    Remove-Retry $path
+                    Save-Retry $path $attempts
                 } else {
                     $errSuffix = if ($cliErr) { " ($cliErr)" } else { "" }
                     Write-Log "FAILED upload$errSuffix (attempt $attempts/$($script:MAX_RETRY)) - queued for retry: $name" "WARN"
@@ -1326,6 +1381,7 @@ CREATE INDEX IF NOT EXISTS idx_logs_level ON logs(level);
             Write-Log "EXCEPTION for $([System.IO.Path]::GetFileName($path)): $_" "ERROR"
         } finally {
             $null = $script:inFlight.Remove($path)
+            Write-AppStatus "watching"
         }
     }
 
@@ -1381,6 +1437,14 @@ CREATE INDEX IF NOT EXISTS idx_logs_level ON logs(level);
 
     Initialize-DB
     Load-Cache
+    if ($RetryFailed) {
+        Invoke-SqliteQuery -DataSource $script:DB -Query "UPDATE retry_queue SET attempts=0, last_attempt=NULL;" | Out-Null
+        return
+    }
+    if ($AppMode -and $script:WATCH_DIRS.Count -eq 0) {
+        Write-AppStatus "unavailable"
+        throw "No selected folders are available."
+    }
 
     if ($StatusOnly) {
         Write-Host ""
@@ -1479,6 +1543,7 @@ CREATE INDEX IF NOT EXISTS idx_logs_level ON logs(level);
     Write-Host "==========================================================" -ForegroundColor Cyan
     Write-Host ""
 
+    Write-AppStatus "scanning"
     # Phase 1 - Startup scan for unrecorded files
     Write-Host "[Phase 1] Scanning for unrecorded files..." -ForegroundColor Cyan
 
@@ -1497,7 +1562,7 @@ CREATE INDEX IF NOT EXISTS idx_logs_level ON logs(level);
     # Include pending retry queue files
     foreach ($qf in @($script:retryMap.Keys)) {
         $fi = New-Object System.IO.FileInfo($qf)
-        if ($fi.Exists -and ($ForceResync -or (-not (Test-IsDuplicateUpload $qf)))) {
+        if ((Test-SelectedPath $qf) -and (Test-IsEligibleMedia $fi) -and $fi.Exists -and ($ForceResync -or (-not (Test-IsDuplicateUpload $qf)))) {
             $unrecorded.Add($fi)
         }
     }
@@ -1524,6 +1589,7 @@ CREATE INDEX IF NOT EXISTS idx_logs_level ON logs(level);
     Write-Host "  Waiting for new downloads... Press Ctrl+C to stop." -ForegroundColor DarkGray
     Write-Host ""
 
+    Write-AppStatus "watching"
     $script:recentEvents = New-Object 'System.Collections.Generic.Dictionary[string,DateTime]' ([System.StringComparer]::OrdinalIgnoreCase)
 
     function Process-WatchEvent([string]$evPath) {
@@ -1604,7 +1670,7 @@ CREATE INDEX IF NOT EXISTS idx_logs_level ON logs(level);
     # -----------------------------------------------------------------
     $lastSweep = [DateTime]::MinValue
     $lastRetryFlush = [DateTime]::MinValue
-    while ($true) {
+    while (-not (Test-AppStop)) {
         Start-Sleep -Seconds 1
         $now = [DateTime]::Now
 
@@ -1612,6 +1678,8 @@ CREATE INDEX IF NOT EXISTS idx_logs_level ON logs(level);
         if (($now - $lastRetryFlush).TotalSeconds -ge 30) {
             $lastRetryFlush = $now
             foreach ($qf in @($script:retryMap.Keys)) {
+                if (-not (Test-SelectedPath $qf)) { Remove-Retry $qf; continue }
+                if ($script:retryMap[$qf] -ge $script:MAX_RETRY) { continue }
                 if ($script:history.Contains($qf)) {
                     Remove-Retry $qf
                     continue
@@ -1644,6 +1712,7 @@ CREATE INDEX IF NOT EXISTS idx_logs_level ON logs(level);
         }
     }
 } finally {
+    Write-AppStatus "paused"
     if ($script:watchers) {
         foreach ($w in $script:watchers) {
             try {

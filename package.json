@@ -1,0 +1,111 @@
+{
+  "name": "googleunlimited",
+  "version": "1.0.0",
+  "private": true,
+  "license": "UNLICENSED",
+  "homepage": "https://github.com/MatteioCodes/GoogleUnlimited-Ui",
+  "desktopName": "googleunlimited.desktop",
+  "description": "A desktop photo backup app for Google Photos",
+  "author": "GoogleUnlimited contributors",
+  "main": "desktop/main.cjs",
+  "scripts": {
+    "start": "electron .",
+    "test": "python3 -m unittest discover -s tests -v",
+    "test:browser": "python3 tests/browser_smoke.py",
+    "test:desktop": "node tests/desktop_smoke.cjs",
+    "prepare:linux": "node scripts/prepare_runtime.cjs linux",
+    "prepare:win": "node scripts/prepare_runtime.cjs win",
+    "dist:linux": "npm run prepare:linux && electron-builder --linux deb AppImage --x64 --publish never",
+    "dist:win": "npm run prepare:win && node scripts/build_windows.cjs",
+    "dist": "npm run dist:linux && npm run dist:win"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.61.1",
+    "electron": "44.7.2",
+    "electron-builder": "26.15.3",
+    "playwright": "1.61.1"
+  },
+  "build": {
+    "appId": "io.googleunlimited.desktop",
+    "productName": "GoogleUnlimited",
+    "asar": true,
+    "directories": {
+      "output": "dist",
+      "buildResources": "desktop/assets"
+    },
+    "files": [
+      "desktop/**",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "ui",
+        "to": "ui"
+      },
+      {
+        "from": "third-party",
+        "to": "third-party"
+      }
+    ],
+    "linux": {
+      "syncDesktopName": true,
+      "category": "Photography",
+      "icon": "desktop/assets/icon.png",
+      "executableName": "googleunlimited",
+      "artifactName": "GoogleUnlimited-${version}-${arch}.${ext}",
+      "extraResources": [
+        {
+          "from": "build/runtime/linux",
+          "to": "service"
+        },
+        {
+          "from": "gotohp-cli_amd64",
+          "to": "upload/gotohp-cli"
+        }
+      ]
+    },
+    "deb": {
+      "maintainer": "GoogleUnlimited contributors",
+      "depends": [
+        "libgtk-3-0",
+        "libnss3",
+        "libxss1",
+        "libasound2",
+        "libgbm1",
+        "libx11-xcb1",
+        "libxshmfence1",
+        "libsecret-1-0",
+        "libc6 (>= 2.35)",
+        "bash",
+        "util-linux",
+        "coreutils",
+        "findutils"
+      ]
+    },
+    "win": {
+      "icon": "desktop/assets/icon.ico",
+      "signExecutable": false,
+      "artifactName": "GoogleUnlimited-Setup-${version}-${arch}.${ext}",
+      "extraResources": [
+        {
+          "from": "build/runtime/win",
+          "to": "service"
+        },
+        {
+          "from": "gotohp-cli-x64.exe",
+          "to": "upload/gotohp-cli.exe"
+        }
+      ]
+    },
+    "nsis": {
+      "include": "desktop/assets/installer.nsh",
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "deleteAppDataOnUninstall": false,
+      "runAfterFinish": true
+    }
+  }
+}

@@ -3,7 +3,6 @@
 *.db-wal
 *.db-shm
 gphotos.db
-watch_dirs.txt
 
 # Authentication Credentials & Tokens (DO NOT COMMIT)
 gotohp.config
@@ -22,3 +21,24 @@ ehthumbs.db
 Desktop.ini
 $RECYCLE.BIN/
 .DS_Store
+
+# Local dashboard folder choices and Python caches
+watch-folders.txt
+app-settings.json
+.backup.lock
+__pycache__/
+*.pyc
+
+# Desktop build dependencies and installer artifacts
+node_modules/
+build/
+dist/
+.desktop-test-data/
+
+# Native backend and frontend profile state
+watch_dirs.txt
+app-account.json
+.app-stop
+.watcher.pid
+.watcher.lock
+.watcher-events.*

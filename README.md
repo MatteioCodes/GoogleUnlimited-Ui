@@ -1,5 +1,34 @@
 # GoogleUnlimited
 
+## Desktop app and installers
+
+**[Download the desktop app for Windows and Linux](https://github.com/MatteioCodes/GoogleUnlimited-Ui/releases/latest)**
+
+The desktop app wraps the current `WatchAndUpload.ps1` and `google-unlimited.sh`
+backends with a photo library UI informed by [Ente Photos](https://github.com/ente-io/ente).
+Connect Google Photos, choose folders with a native picker, start or pause backup,
+view local photo previews and activity, retry failures, and choose light or dark mode.
+The app includes a system tray and optional startup at sign-in.
+
+| Platform | Download |
+| --- | --- |
+| Windows 10/11 x64 | [Setup installer](https://github.com/MatteioCodes/GoogleUnlimited-Ui/releases/download/v1.0.0/GoogleUnlimited-Setup-1.0.0-x64.exe) |
+| Ubuntu 22.04+ / Debian 12+ x64 | [Debian package](https://github.com/MatteioCodes/GoogleUnlimited-Ui/releases/download/v1.0.0/GoogleUnlimited-1.0.0-amd64.deb) |
+| Other Linux desktops with glibc 2.35+ | [AppImage](https://github.com/MatteioCodes/GoogleUnlimited-Ui/releases/download/v1.0.0/GoogleUnlimited-1.0.0-x86_64.AppImage) |
+
+The installers include the app, upload CLI, and backend dependencies. Windows uses
+its built-in PowerShell. Linux includes SQLite and inotify tools. No terminal,
+Node.js, or system Python setup is needed. Installers are currently unsigned.
+
+![Desktop photo library](docs/dashboard.png)
+
+**[Desktop setup, architecture, building, and checks](docs/desktop.md)**
+
+The scripts below remain usable on their own. Both interfaces use the same backend
+implementation; the desktop profile lives separately from a portable script setup.
+
+---
+
 > Automated, cross-platform media synchronization utility for Google Photos.  
 > Runs as a lightweight native background watcher on Windows, macOS, and Linux to automatically sync photos and videos using Google Pixel device emulation powered by [`xob0t/gotohp`](https://github.com/xob0t/gotohp) — without virtual machines, Android emulators, Windows Subsystem for Android (WSA), or WSL.
 
